@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys  # <--- Додали для перезапуску
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, StateFilter
@@ -31,7 +32,7 @@ def main_kb():
     kb = [
         [KeyboardButton(text="⚡️ Швидка витрата")],
         [KeyboardButton(text="💸 Витрата (Детально)"), KeyboardButton(text="💰 Дохід")],
-        [KeyboardButton(text="📊 Статистика")]  # <--- НОВА КНОПКА
+        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="↩️ Скасувати")]  # <--- Додали Скасування
     ]
     return ReplyKeyboardMarkup(
         keyboard=kb,
@@ -66,6 +67,38 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer(f"Привіт, {name}! 👋\nФінанси готові до запису.", reply_markup=main_kb())
 
 
+# --- АДМІНСЬКА КОМАНДА: RESTART ---
+@dp.message(Command("restart"))
+async def cmd_restart(message: types.Message):
+    if message.from_user.id not in USERS: return
+
+    await message.answer("🔄 Перезапускаю систему... (Це займе 10-15 сек)")
+    # Завершуємо процес. Run_Bot.bat побачить це, зробить git pull і запустить знову.
+    sys.exit(0)
+
+
+# --- СКАСУВАННЯ ОСТАННЬОЇ ДІЇ ---
+@dp.message(F.text == "↩️ Скасувати")
+async def undo_last(message: types.Message):
+    if message.from_user.id not in USERS: return
+
+    await message.answer("⏳ Видаляю останній запис...")
+
+    result = gs.undo_last_transaction()
+
+    if result:
+        await message.answer(
+            f"🗑 <b>Видалено останній запис:</b>\n"
+            f"📅 {result['date']}\n"
+            f"📂 {result['category']}\n"
+            f"💵 {result['amount']}\n"
+            f"🛒 {result['desc']}",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer("❌ Не вдалося видалити. Можливо, таблиця порожня або сталася помилка.")
+
+
 # --- ГЛОБАЛЬНІ КНОПКИ ---
 @dp.message(F.text == "🔙 Назад", StateFilter("*"))
 async def go_back(message: types.Message, state: FSMContext):
@@ -73,22 +106,16 @@ async def go_back(message: types.Message, state: FSMContext):
     await message.answer("Головне меню", reply_markup=main_kb())
 
 
-# ================= СТАТИСТИКА (НОВЕ) =================
 @dp.message(F.text == "📊 Статистика")
 async def show_stats(message: types.Message):
     if message.from_user.id not in USERS: return
-
     await message.answer("⏳ Рахую бухгалтерію...")
-
     stats = gs.get_month_stats()
-
     if not stats:
-        await message.answer("❌ Не вдалося отримати дані з таблиці.")
+        await message.answer("❌ Не вдалося отримати дані.")
         return
-
-    # Формуємо текст
     text = (
-        f"📅 <b>Статистика за поточний місяць</b>\n"
+        f"📅 <b>Статистика за {stats['month_name']}</b>\n"
         f"➖➖➖➖➖➖➖➖➖➖\n"
         f"📉 <b>Витрати:</b> {stats['expense']:,.0f} грн\n"
         f"📈 <b>Дохід:</b> {stats['income']:,.0f} грн\n"
@@ -96,13 +123,11 @@ async def show_stats(message: types.Message):
         f"➖➖➖➖➖➖➖➖➖➖\n"
         f"🏆 <b>Топ-3 витрат:</b>\n"
     )
-
     if stats['top_cats']:
         for cat, amount in stats['top_cats']:
             text += f"▫️ {cat}: {amount:,.0f} грн\n"
     else:
         text += "▫️ Поки пусто"
-
     await message.answer(text, parse_mode="HTML")
 
 
@@ -117,8 +142,8 @@ async def quick_start(message: types.Message, state: FSMContext):
 
 @dp.message(FinanceForm.quick_amount)
 async def quick_amount_handler(message: types.Message, state: FSMContext):
-    if message.text in ["⚡️ Швидка витрата", "💰 Дохід", "💸 Витрата (Детально)", "📊 Статистика"]:
-        await message.answer("Спершу заверши введення або натисни /start.")
+    if message.text in ["⚡️ Швидка витрата", "💰 Дохід", "💸 Витрата (Детально)", "📊 Статистика", "↩️ Скасувати"]:
+        await message.answer("Заверши введення або натисни /start.")
         return
     try:
         val = float(message.text.replace(',', '.'))
@@ -135,7 +160,6 @@ async def quick_desc_handler(message: types.Message, state: FSMContext):
     data = await state.get_data()
     who = USERS[message.from_user.id]
     category = "⏳ Очікує уточнення"
-
     msg = await message.answer("⏳ Записую...")
     success = gs.add_transaction(
         date=datetime.now().strftime("%d.%m.%Y"),
@@ -159,10 +183,8 @@ async def quick_desc_handler(message: types.Message, state: FSMContext):
 async def full_start(message: types.Message, state: FSMContext):
     if message.from_user.id not in USERS: return
     await state.clear()
-
     is_expense = "Витрата" in message.text
     t_type = "Витрати" if is_expense else "Поповнення"
-
     await state.update_data(t_type=t_type)
     await state.set_state(FinanceForm.category)
     await message.answer("Обери категорію:", reply_markup=categories_kb(is_expense))
@@ -171,7 +193,7 @@ async def full_start(message: types.Message, state: FSMContext):
 @dp.message(FinanceForm.category)
 async def full_cat(message: types.Message, state: FSMContext):
     if message.text not in EXPENSE_CATEGORIES and message.text not in INCOME_CATEGORIES:
-        await message.answer("⚠️ Обери категорію з меню або '🔙 Назад'")
+        await message.answer("⚠️ Обери категорію з меню")
         return
     await state.update_data(category=message.text)
     await state.set_state(FinanceForm.amount)

@@ -1,7 +1,7 @@
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
-import re  # Додали бібліотеку для регулярних виразів
+import re
 from config import SPREADSHEET_ID, SHEET_NAME
 
 
@@ -16,27 +16,12 @@ class GoogleSheetManager:
         self.client = gspread.authorize(self.creds)
 
     def _clean_amount(self, amount_str):
-        """
-        Розумна очистка суми.
-        Перетворює: " 10,00 грн. ", "1 500.50", "120 грн" -> на чистий float
-        """
         if isinstance(amount_str, (int, float)):
             return float(amount_str)
-
-        # Перетворюємо в рядок
         s = str(amount_str)
-
-        # 1. Видаляємо все, що НЕ є цифрою, комою або крапкою (букви, пробіли, символи валют)
-        # re.sub(r'[^\d,.]', '', s) залишить тільки цифри і роздільники
         s = re.sub(r'[^\d,.]', '', s)
-
-        # 2. Замінюємо кому на крапку
         s = s.replace(',', '.')
-
-        # 3. Видаляємо зайві крапки в кінці (якщо лишилися після 'грн.')
         s = s.rstrip('.')
-
-        # 4. Пробуємо перетворити
         try:
             return float(s)
         except ValueError:
@@ -59,16 +44,14 @@ class GoogleSheetManager:
                 return False
 
     def get_month_stats(self):
-        """Рахує статистику за ПОТОЧНИЙ місяць"""
         try:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
             all_values = sheet.get_all_values()
 
-            # Пропускаємо перші 2 рядки (заголовки і інпут)
             if len(all_values) > 2:
                 data_rows = all_values[2:]
             else:
-                return None  # Таблиця порожня
+                return None
 
             now = datetime.now()
             current_month = now.month
@@ -79,22 +62,15 @@ class GoogleSheetManager:
             categories = {}
 
             for row in data_rows:
-                # Перевірка на цілісність рядка (мінімум 4 стовпці: Дата, Кат, Сума, Тип)
-                if not row or len(row) < 4 or not row[0]:
-                    continue
-
+                if not row or len(row) < 4 or not row[0]: continue
                 try:
-                    # Пробуємо дату
                     t_date = datetime.strptime(row[0], "%d.%m.%Y")
                 except ValueError:
-                    continue  # Пропускаємо рядки з кривою датою
+                    continue
 
-                # Якщо поточний місяць
                 if t_date.month == current_month and t_date.year == current_year:
-                    amount = self._clean_amount(row[2])  # Парсимо суму
+                    amount = self._clean_amount(row[2])
                     t_type = row[3].strip()
-
-                    # Враховуємо "Доходи" і "Поповнення"
                     if t_type in ["Поповнення", "Дохід", "Доходи"]:
                         income += amount
                     else:
@@ -103,7 +79,6 @@ class GoogleSheetManager:
                         categories[cat] = categories.get(cat, 0) + amount
 
             top_cats = sorted(categories.items(), key=lambda x: x[1], reverse=True)[:3]
-
             return {
                 "income": income,
                 "expense": expense,
@@ -111,7 +86,33 @@ class GoogleSheetManager:
                 "top_cats": top_cats,
                 "month_name": now.strftime("%B")
             }
-
         except Exception as e:
             print(f"🔴 Error stats: {e}")
+            return None
+
+    def undo_last_transaction(self):
+        """Видаляє останній доданий рядок (це завжди рядок №3)"""
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+
+            # Отримуємо дані рядка, щоб показати юзеру, що видалили
+            # Рядок 3 (в gspread індексація з 1)
+            row_values = sheet.row_values(3)
+
+            # Перевірка: чи не видаляємо ми заголовок (якщо таблиця порожня)
+            if not row_values or row_values[0] == "Дата":
+                return None
+
+            # Видаляємо рядок 3
+            sheet.delete_rows(3)
+
+            # Повертаємо інфу про те, що видалили
+            return {
+                "date": row_values[0],
+                "category": row_values[1],
+                "amount": row_values[2],
+                "desc": row_values[4] if len(row_values) > 4 else ""
+            }
+        except Exception as e:
+            print(f"🔴 Error undo: {e}")
             return None
