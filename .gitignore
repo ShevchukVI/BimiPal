@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+service_account.json
+config.py
+.idea/
+.vscode/
