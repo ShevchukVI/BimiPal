@@ -10,7 +10,6 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemo
 from config import BOT_TOKEN, USERS, EXPENSE_CATEGORIES, INCOME_CATEGORIES
 from gs_manager import GoogleSheetManager
 
-# Логування
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN)
@@ -23,7 +22,6 @@ class FinanceForm(StatesGroup):
     category = State()
     amount = State()
     description = State()
-
     quick_amount = State()
     quick_desc = State()
 
@@ -32,9 +30,9 @@ class FinanceForm(StatesGroup):
 def main_kb():
     kb = [
         [KeyboardButton(text="⚡️ Швидка витрата")],
-        [KeyboardButton(text="💸 Витрата (Детально)"), KeyboardButton(text="💰 Дохід")]
+        [KeyboardButton(text="💸 Витрата (Детально)"), KeyboardButton(text="💰 Дохід")],
+        [KeyboardButton(text="📊 Статистика")]  # <--- НОВА КНОПКА
     ]
-    # is_persistent=True тримає меню завжди відкритим, input_field_placeholder - підказка
     return ReplyKeyboardMarkup(
         keyboard=kb,
         resize_keyboard=True,
@@ -60,7 +58,7 @@ def categories_kb(is_expense=True):
 # --- START ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear()  # Очищаємо стан на випадок рестарту
+    await state.clear()
     if message.from_user.id not in USERS:
         await message.answer("⛔️ Немає доступу.")
         return
@@ -68,39 +66,67 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer(f"Привіт, {name}! 👋\nФінанси готові до запису.", reply_markup=main_kb())
 
 
-# --- ГЛОБАЛЬНІ КНОПКИ (Працюють у будь-якому стані) ---
-
+# --- ГЛОБАЛЬНІ КНОПКИ ---
 @dp.message(F.text == "🔙 Назад", StateFilter("*"))
 async def go_back(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Головне меню", reply_markup=main_kb())
 
 
-# ================= ШВИДКА ВИТРАТА =================
+# ================= СТАТИСТИКА (НОВЕ) =================
+@dp.message(F.text == "📊 Статистика")
+async def show_stats(message: types.Message):
+    if message.from_user.id not in USERS: return
 
-# StateFilter('*') означає: навіть якщо бот чекає число, а ти тицьнув кнопку - спрацює кнопка
+    await message.answer("⏳ Рахую бухгалтерію...")
+
+    stats = gs.get_month_stats()
+
+    if not stats:
+        await message.answer("❌ Не вдалося отримати дані з таблиці.")
+        return
+
+    # Формуємо текст
+    text = (
+        f"📅 <b>Статистика за поточний місяць</b>\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"📉 <b>Витрати:</b> {stats['expense']:,.0f} грн\n"
+        f"📈 <b>Дохід:</b> {stats['income']:,.0f} грн\n"
+        f"💰 <b>Різниця:</b> {stats['balance']:,.0f} грн\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"🏆 <b>Топ-3 витрат:</b>\n"
+    )
+
+    if stats['top_cats']:
+        for cat, amount in stats['top_cats']:
+            text += f"▫️ {cat}: {amount:,.0f} грн\n"
+    else:
+        text += "▫️ Поки пусто"
+
+    await message.answer(text, parse_mode="HTML")
+
+
+# ================= ШВИДКА ВИТРАТА =================
 @dp.message(F.text == "⚡️ Швидка витрата", StateFilter("*"))
 async def quick_start(message: types.Message, state: FSMContext):
     if message.from_user.id not in USERS: return
-    await state.clear()  # Скидаємо все, що було до цього
+    await state.clear()
     await state.set_state(FinanceForm.quick_amount)
     await message.answer("Введи суму (швидка):", reply_markup=ReplyKeyboardRemove())
 
 
 @dp.message(FinanceForm.quick_amount)
 async def quick_amount_handler(message: types.Message, state: FSMContext):
-    # Тут перевіряємо, чи не натиснув юзер кнопку меню, якої тут не має бути, але про всяк випадок
-    if message.text in ["⚡️ Швидка витрата", "💰 Дохід", "💸 Витрата (Детально)"]:
-        await message.answer("Спершу заверши введення або натисни /start для скидання.")
+    if message.text in ["⚡️ Швидка витрата", "💰 Дохід", "💸 Витрата (Детально)", "📊 Статистика"]:
+        await message.answer("Спершу заверши введення або натисни /start.")
         return
-
     try:
         val = float(message.text.replace(',', '.'))
         await state.update_data(amount=val)
         await state.set_state(FinanceForm.quick_desc)
         await message.answer("На що витрачено? (Коротко):")
     except ValueError:
-        await message.answer("🔢 Введи просто число (наприклад 50).")
+        await message.answer("🔢 Введи просто число.")
 
 
 @dp.message(FinanceForm.quick_desc)
@@ -108,43 +134,33 @@ async def quick_desc_handler(message: types.Message, state: FSMContext):
     desc = message.text
     data = await state.get_data()
     who = USERS[message.from_user.id]
-
-    # ⬇️ ЗМІНЕНО: Категорія за замовчуванням
     category = "⏳ Очікує уточнення"
 
     msg = await message.answer("⏳ Записую...")
-
     success = gs.add_transaction(
         date=datetime.now().strftime("%d.%m.%Y"),
         category=category,
         amount=data['amount'],
-        t_type="Витрати",  # ⬇️ ЗМІНЕНО: Було "Витрата", стало "Витрати"
+        t_type="Витрати",
         item_name=desc,
         note="Швидкий запис",
         who=who
     )
-
     if success:
-        await msg.edit_text(
-            f"✅ <b>-{data['amount']} грн</b> ({desc})\n"
-            f"Категорія: {category}",
-            parse_mode="HTML"
-        )
+        await msg.edit_text(f"✅ <b>-{data['amount']} грн</b>\nКатегорія: {category}", parse_mode="HTML")
         await message.answer("Готово!", reply_markup=main_kb())
     else:
-        await msg.edit_text("❌ Помилка запису в таблицю.")
+        await msg.edit_text("❌ Помилка запису.")
     await state.clear()
 
 
 # ================= ДЕТАЛЬНИЙ ЗАПИС =================
-
 @dp.message(F.text.in_({"💸 Витрата (Детально)", "💰 Дохід"}), StateFilter("*"))
 async def full_start(message: types.Message, state: FSMContext):
     if message.from_user.id not in USERS: return
-    await state.clear()  # Скидаємо попередні стани
+    await state.clear()
 
     is_expense = "Витрата" in message.text
-    # ⬇️ ЗМІНЕНО: Правильні назви типів як у CSV
     t_type = "Витрати" if is_expense else "Поповнення"
 
     await state.update_data(t_type=t_type)
@@ -154,12 +170,9 @@ async def full_start(message: types.Message, state: FSMContext):
 
 @dp.message(FinanceForm.category)
 async def full_cat(message: types.Message, state: FSMContext):
-    # Захист: якщо юзер вводить текст, якого немає в кнопках (окрім Назад)
-    # Хоча тут можна дозволити і свої категорії, але поки строго по кнопках
     if message.text not in EXPENSE_CATEGORIES and message.text not in INCOME_CATEGORIES:
-        await message.answer("⚠️ Будь ласка, обери категорію з меню або натисни '🔙 Назад'")
+        await message.answer("⚠️ Обери категорію з меню або '🔙 Назад'")
         return
-
     await state.update_data(category=message.text)
     await state.set_state(FinanceForm.amount)
     await message.answer("Сума:", reply_markup=ReplyKeyboardRemove())
@@ -181,9 +194,7 @@ async def full_desc(message: types.Message, state: FSMContext):
     desc = message.text
     data = await state.get_data()
     who = USERS[message.from_user.id]
-
     msg = await message.answer("⏳ ...")
-
     success = gs.add_transaction(
         date=datetime.now().strftime("%d.%m.%Y"),
         category=data['category'],
@@ -193,26 +204,19 @@ async def full_desc(message: types.Message, state: FSMContext):
         note="Telegram",
         who=who
     )
-
     emoji = "📉" if data['t_type'] == "Витрати" else "📈"
-
     if success:
         await msg.edit_text(
-            f"{emoji} {data['category']}\n"
-            f"💵 <b>{data['amount']} грн</b>\n"
-            f"🛒 {desc}\n"
-            f"👤 {who}",
+            f"{emoji} {data['category']}\n💵 <b>{data['amount']} грн</b>\n🛒 {desc}\n👤 {who}",
             parse_mode="HTML"
         )
     else:
         await msg.edit_text("❌ Помилка таблиці.")
-
     await state.clear()
     await message.answer("Головне меню", reply_markup=main_kb())
 
 
 async def main():
-    # Видаляємо вебхуки, якщо були, і запускаємо
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
