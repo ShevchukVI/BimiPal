@@ -59,7 +59,7 @@ class GoogleSheetManager:
 
             income = 0.0
             expense = 0.0
-            categories = {}
+            categories = {}  # Словник для діаграми: {'Продукти': 500, ...}
 
             for row in data_rows:
                 if not row or len(row) < 4 or not row[0]: continue
@@ -80,7 +80,6 @@ class GoogleSheetManager:
 
             top_cats = sorted(categories.items(), key=lambda x: x[1], reverse=True)[:3]
 
-            # --- УКРАЇНІЗАЦІЯ МІСЯЦЯ ---
             MONTHS_UA = {
                 1: "Січень", 2: "Лютий", 3: "Березень", 4: "Квітень",
                 5: "Травень", 6: "Червень", 7: "Липень", 8: "Серпень",
@@ -93,10 +92,97 @@ class GoogleSheetManager:
                 "expense": expense,
                 "balance": income - expense,
                 "top_cats": top_cats,
-                "month_name": month_name  # Тепер тут буде українська назва
+                "month_name": month_name,
+                "categories_dict": categories  # <--- ДОДАЛИ ЦЕ ДЛЯ ДІАГРАМИ
             }
         except Exception as e:
             print(f"🔴 Error stats: {e}")
+            return None
+
+    def get_budget_limits(self):
+        """Зчитує ліміти з аркуша 'Планування' у форматі словника"""
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet("Планування")
+            data = sheet.get_all_values()
+
+            limits = {}
+            # Пропускаємо заголовок (перший рядок)
+            for row in data[1:]:
+                if len(row) >= 2 and row[0]:
+                    cat_name = row[0].strip()
+                    amount = self._clean_amount(row[1])
+                    if amount > 0:
+                        limits[cat_name] = amount
+            return limits
+        except Exception as e:
+            print(f"🔴 Error reading limits: {e}")
+            return {}  # Повертаємо пустий словник, якщо помилка
+
+    def update_budget_limit(self, category, new_amount):
+        """Оновлює або додає ліміт для категорії"""
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet("Планування")
+
+            try:
+                # 1. Спробуємо знайти клітинку з точною назвою категорії
+                cell = sheet.find(category)
+                # Якщо знайшли — оновлюємо сусідню клітинку (ціна)
+                sheet.update_cell(cell.row, cell.col + 1, new_amount)
+            except:
+                # 2. Якщо метод find видав будь-яку помилку (не знайшов, або змінилась бібліотека)
+                # Просто додаємо новий рядок в кінець
+                sheet.append_row([category, new_amount])
+
+            return True
+        except Exception as e:
+            print(f"🔴 Error updating limit: {e}")
+            return False
+
+    def get_week_stats(self):
+        """Рахує статистику за останні 7 днів"""
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            all_values = sheet.get_all_values()
+            if len(all_values) <= 2: return None
+
+            data_rows = all_values[2:]
+            now = datetime.now()
+
+            income = 0.0
+            expense = 0.0
+            categories = {}
+
+            for row in data_rows:
+                if not row or len(row) < 4 or not row[0]: continue
+                try:
+                    t_date = datetime.strptime(row[0], "%d.%m.%Y")
+                except ValueError:
+                    continue
+
+                # Різниця в днях між сьогодні і датою транзакції
+                delta = now - t_date
+
+                # Якщо транзакція була за останні 7 днів (і не в майбутньому)
+                if 0 <= delta.days <= 7:
+                    amount = self._clean_amount(row[2])
+                    t_type = row[3].strip()
+
+                    if t_type in ["Поповнення", "Дохід", "Доходи"]:
+                        income += amount
+                    else:
+                        expense += amount
+                        cat = row[1]
+                        categories[cat] = categories.get(cat, 0) + amount
+
+            top_cats = sorted(categories.items(), key=lambda x: x[1], reverse=True)[:5]  # Топ-5
+
+            return {
+                "income": income,
+                "expense": expense,
+                "top_cats": top_cats
+            }
+        except Exception as e:
+            print(f"🔴 Error week stats: {e}")
             return None
 
     def undo_last_transaction(self):
