@@ -79,12 +79,21 @@ class GoogleSheetManager:
                         categories[cat] = categories.get(cat, 0) + amount
 
             top_cats = sorted(categories.items(), key=lambda x: x[1], reverse=True)[:3]
+
+            # --- УКРАЇНІЗАЦІЯ МІСЯЦЯ ---
+            MONTHS_UA = {
+                1: "Січень", 2: "Лютий", 3: "Березень", 4: "Квітень",
+                5: "Травень", 6: "Червень", 7: "Липень", 8: "Серпень",
+                9: "Вересень", 10: "Жовтень", 11: "Листопад", 12: "Грудень"
+            }
+            month_name = MONTHS_UA.get(current_month, "Цей місяць")
+
             return {
                 "income": income,
                 "expense": expense,
                 "balance": income - expense,
                 "top_cats": top_cats,
-                "month_name": now.strftime("%B")
+                "month_name": month_name  # Тепер тут буде українська назва
             }
         except Exception as e:
             print(f"🔴 Error stats: {e}")
