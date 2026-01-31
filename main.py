@@ -10,7 +10,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, BufferedInputFile
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# Прибрали категорії з імпорту config
 from config import BOT_TOKEN, USERS
 from gs_manager import GoogleSheetManager
 import visuals
@@ -27,6 +26,7 @@ EXPENSE_CATS = []
 INCOME_CATS = []
 
 
+# --- СТАНИ (FSM) ---
 class FinanceForm(StatesGroup):
     category = State()
     amount = State()
@@ -37,6 +37,14 @@ class FinanceForm(StatesGroup):
     edit_limit_amount = State()
 
 
+class CurrencyForm(StatesGroup):
+    operation = State()  # Купив / Продав / Витратив / Отримав
+    amount_usd = State()
+    rate = State()
+    description = State()
+
+
+# --- КЛАВІАТУРИ ---
 def main_kb():
     kb = [
         [KeyboardButton(text="⚡️ Швидка витрата")],
@@ -48,15 +56,23 @@ def main_kb():
 
 def other_kb():
     kb = [
-        [KeyboardButton(text="🍰 Діаграма витрат"), KeyboardButton(text="📉 Звіт (Тиждень)")],
-        [KeyboardButton(text="↩️ Скасувати"), KeyboardButton(text="🔔 Перевірити ліміти")],
+        [KeyboardButton(text="🇺🇸 Валюта"), KeyboardButton(text="🍰 Діаграма")],
+        [KeyboardButton(text="📉 Звіт (Тиждень)"), KeyboardButton(text="🔔 Перевірити ліміти")],
         [KeyboardButton(text="⚙️ Змінити ліміт"), KeyboardButton(text="🔙 Назад")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 
+def currency_kb():
+    kb = [
+        [KeyboardButton(text="📥 Купив $"), KeyboardButton(text="📤 Продав $")],
+        [KeyboardButton(text="💰 Отримав $"), KeyboardButton(text="🛒 Витратив $")],  # <--- Нова кнопка тут
+        [KeyboardButton(text="🔙 Назад")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+
 def categories_kb(is_expense=True):
-    # Використовуємо глобальні змінні
     cats = EXPENSE_CATS if is_expense else INCOME_CATS
     kb = []
     row = []
@@ -83,6 +99,7 @@ def limits_edit_kb():
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 
+# --- START & MENU ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
@@ -109,7 +126,94 @@ async def cmd_restart(message: types.Message):
     sys.exit(0)
 
 
-# --- STATISTICS ---
+# ================= ВАЛЮТА (ОНОВЛЕНО) =================
+@dp.message(F.text == "🇺🇸 Валюта")
+async def currency_menu(message: types.Message):
+    await message.answer("💵 Операції з доларами:", reply_markup=currency_kb())
+
+
+@dp.message(F.text.in_({"📥 Купив $", "📤 Продав $", "🛒 Витратив $", "💰 Отримав $"}))
+async def curr_start(message: types.Message, state: FSMContext):
+    op = message.text
+    await state.update_data(op=op)
+    await state.set_state(CurrencyForm.amount_usd)
+    await message.answer("Скільки доларів? ($):", reply_markup=ReplyKeyboardRemove())
+
+
+@dp.message(CurrencyForm.amount_usd)
+async def curr_amount(message: types.Message, state: FSMContext):
+    try:
+        val = float(message.text.replace(',', '.'))
+        await state.update_data(amount_usd=val)
+
+        data = await state.get_data()
+        # Для "Витратив" і "Отримав" курс не питаємо (він не впливає на грн)
+        if data['op'] in ["🛒 Витратив $", "💰 Отримав $"]:
+            await state.update_data(rate=0.0)
+            await state.set_state(CurrencyForm.description)
+            text_prompt = "На що витратив?" if data['op'] == "🛒 Витратив $" else "Від кого/за що отримав?"
+            await message.answer(text_prompt)
+        else:
+            await state.set_state(CurrencyForm.rate)
+            await message.answer("Який курс? (грн/$):")
+    except:
+        await message.answer("Число!")
+
+
+@dp.message(CurrencyForm.rate)
+async def curr_rate(message: types.Message, state: FSMContext):
+    try:
+        val = float(message.text.replace(',', '.'))
+        await state.update_data(rate=val)
+        await state.set_state(CurrencyForm.description)
+        await message.answer("Коментар (необов'язково):")
+    except:
+        await message.answer("Число!")
+
+
+@dp.message(CurrencyForm.description)
+async def curr_save(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    usd = data['amount_usd']
+    rate = data['rate']
+    op = data['op']
+    note = message.text
+    who = USERS[message.from_user.id]
+    date = datetime.now().strftime("%d.%m.%Y")
+
+    uah_val = usd * rate
+
+    await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+
+    # 1. Визначаємо знак для сейфа (+ або -)
+    usd_sign = usd if op in ["📥 Купив $", "💰 Отримав $"] else -usd
+
+    # 2. Запис в аркуш "Валюта"
+    gs.add_currency_transaction(date, op, usd_sign, rate, uah_val, note)
+
+    # 3. Дублювання в основну таблицю (для історії руху гривні)
+    msg = ""
+    if op == "📥 Купив $":
+        gs.add_transaction(date, "💵 Купівля валюти", uah_val, "Витрати", f"{usd}$ по {rate}", "Auto-Currency", who)
+        msg = f"✅ Купив {usd}$ за {uah_val:.0f} грн.\nДодано в сейф."
+
+    elif op == "📤 Продав $":
+        gs.add_transaction(date, "🔁 Обмін валют", uah_val, "Дохід", f"Продав {usd}$ по {rate}", "Auto-Currency", who)
+        msg = f"✅ Продав {usd}$ за {uah_val:.0f} грн.\nГривні зараховано."
+
+    elif op == "💰 Отримав $":
+        # Записуємо як дохід з 0 грн, щоб було в історії
+        gs.add_transaction(date, "💵 Валютний дохід", 0, "Дохід", f"Отримав {usd}$ ({note})", "Auto-Currency", who)
+        msg = f"✅ Отримав {usd}$ у сейф.\n(Гривня не змінилась)"
+
+    else:  # Витратив $
+        msg = f"✅ Витратив {usd}$ з сейфа.\n({note})"
+
+    await message.answer(msg, reply_markup=main_kb())
+    await state.clear()
+
+
+# ================= СТАТИСТИКА =================
 @dp.message(F.text == "📊 Статистика")
 async def show_stats(message: types.Message):
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
@@ -118,7 +222,8 @@ async def show_stats(message: types.Message):
         await message.answer("❌ Помилка.")
         return
     text = (
-        f"🏦 <b>Всього на руках:</b> {stats['total_wallet']:,.0f} грн\n"
+        f"🏦 <b>Гаманець UAH:</b> {stats['total_wallet']:,.0f} грн\n"
+        f"🇺🇸 <b>Гаманець USD:</b> {stats['usd_wallet']:,.0f} $\n"
         f"➖➖➖➖➖➖➖➖➖➖\n"
         f"📅 <b>{stats['month_name']} (Потік):</b>\n"
         f"📉 Витрати: {stats['expense']:,.0f} грн\n"
@@ -132,8 +237,8 @@ async def show_stats(message: types.Message):
     await message.answer(text, parse_mode="HTML")
 
 
-# --- CHART & REPORTS ---
-@dp.message(F.text == "🍰 Діаграма витрат")
+# ================= ЗВІТИ ТА ЛІМІТИ =================
+@dp.message(F.text == "🍰 Діаграма")
 async def send_chart(message: types.Message):
     if message.from_user.id not in USERS: return
     await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_PHOTO)
@@ -162,7 +267,6 @@ async def report_week(message: types.Message):
     await message.answer(text, parse_mode="HTML")
 
 
-# --- LIMITS ---
 @dp.message(F.text == "🔔 Перевірити ліміти")
 async def check_limits_manual(message: types.Message):
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
@@ -213,7 +317,17 @@ async def edit_limit_save(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-# --- TRANSACTIONS ---
+@dp.message(F.text == "↩️ Скасувати")
+async def undo_last(message: types.Message):
+    await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+    res = gs.undo_last_transaction()
+    if res:
+        await message.answer(f"🗑 Видалено: {res['amount']} грн")
+    else:
+        await message.answer("❌ Помилка.")
+
+
+# ================= СТАНДАРТНІ ОПЕРАЦІЇ =================
 @dp.message(F.text == "⚡️ Швидка витрата")
 async def quick_start(message: types.Message, state: FSMContext):
     await state.set_state(FinanceForm.quick_amount)
@@ -277,7 +391,6 @@ async def full_save(message: types.Message, state: FSMContext):
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     gs.add_transaction(datetime.now().strftime("%d.%m.%Y"), data['category'], data['amount'], data['t_type'],
                        message.text, "Bot", who)
-
     if data['t_type'] == "Витрати":
         limits = gs.get_budget_limits()
         if data['category'] in limits:
@@ -285,19 +398,8 @@ async def full_save(message: types.Message, state: FSMContext):
             stats = gs.get_month_stats()
             spent = stats['categories_dict'].get(data['category'], 0)
             if spent > limit: await message.answer(f"⚠️ Переліміт! {spent:.0f}/{limit:.0f}", parse_mode="HTML")
-
     await message.answer("✅ Записано!", reply_markup=main_kb())
     await state.clear()
-
-
-@dp.message(F.text == "↩️ Скасувати")
-async def undo_last(message: types.Message):
-    await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-    res = gs.undo_last_transaction()
-    if res:
-        await message.answer(f"🗑 Видалено: {res['amount']} грн")
-    else:
-        await message.answer("❌ Помилка.")
 
 
 async def evening_reminder():
@@ -309,13 +411,10 @@ async def evening_reminder():
 
 
 async def main():
-    # --- ЗАВАНТАЖЕННЯ КАТЕГОРІЙ ---
     global EXPENSE_CATS, INCOME_CATS
     print("📥 Loading categories...")
-    # Тут головна магія: бот йде в таблицю і бере список
     EXPENSE_CATS, INCOME_CATS = gs.get_categories()
-    print(f"✅ Loaded {len(EXPENSE_CATS)} expense and {len(INCOME_CATS)} income cats.")
-
+    print(f"✅ Loaded {len(EXPENSE_CATS)} expense cats.")
     scheduler.add_job(evening_reminder, 'cron', hour=21, minute=0)
     scheduler.start()
     await bot.delete_webhook(drop_pending_updates=True)
