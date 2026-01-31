@@ -198,12 +198,12 @@ async def curr_save(message: types.Message, state: FSMContext):
         msg = f"✅ Купив {usd}$ за {uah_val:.0f} грн.\nДодано в сейф."
 
     elif op == "📤 Продав $":
-        gs.add_transaction(date, "🔁 Обмін валют", uah_val, "Дохід", f"Продав {usd}$ по {rate}", "Auto-Currency", who)
+        gs.add_transaction(date, "🔁 Обмін валют", uah_val, "Поповнення", f"Продав {usd}$ по {rate}", "Auto-Currency", who)
         msg = f"✅ Продав {usd}$ за {uah_val:.0f} грн.\nГривні зараховано."
 
     elif op == "💰 Отримав $":
         # Записуємо як дохід з 0 грн, щоб було в історії
-        gs.add_transaction(date, "💵 Валютний дохід", 0, "Дохід", f"Отримав {usd}$ ({note})", "Auto-Currency", who)
+        gs.add_transaction(date, "💵 Валютний дохід", 0, "Поповнення", f"Отримав {usd}$ ({note})", "Auto-Currency", who)
         msg = f"✅ Отримав {usd}$ у сейф.\n(Гривня не змінилась)"
 
     else:  # Витратив $
