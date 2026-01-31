@@ -7,7 +7,8 @@ from aiogram.enums import ChatAction
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, BufferedInputFile
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, BufferedInputFile, \
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import BOT_TOKEN, USERS
@@ -21,9 +22,10 @@ dp = Dispatcher()
 gs = GoogleSheetManager()
 scheduler = AsyncIOScheduler()
 
-# --- ГЛОБАЛЬНІ ЗМІННІ ДЛЯ КАТЕГОРІЙ ---
+# --- ГЛОБАЛЬНІ ЗМІННІ ---
 EXPENSE_CATS = []
 INCOME_CATS = []
+PENDING_REMINDERS = {}  # Тимчасова пам'ять для кнопок "Сплатити"
 
 
 # --- СТАНИ (FSM) ---
@@ -66,7 +68,7 @@ def other_kb():
 def currency_kb():
     kb = [
         [KeyboardButton(text="📥 Купив $"), KeyboardButton(text="📤 Продав $")],
-        [KeyboardButton(text="💰 Отримав $"), KeyboardButton(text="🛒 Витратив $")],  # <--- Нова кнопка тут
+        [KeyboardButton(text="💰 Отримав $"), KeyboardButton(text="🛒 Витратив $")],
         [KeyboardButton(text="🔙 Назад")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
@@ -91,9 +93,7 @@ def limits_edit_kb():
     row = []
     for c in EXPENSE_CATS:
         row.append(KeyboardButton(text=c))
-        if len(row) == 2:
-            kb.append(row)
-            row = []
+        if len(row) == 2: kb.append(row); row = []
     if row: kb.append(row)
     kb.append([KeyboardButton(text="🔙 Назад")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
@@ -126,7 +126,79 @@ async def cmd_restart(message: types.Message):
     sys.exit(0)
 
 
-# ================= ВАЛЮТА (ОНОВЛЕНО) =================
+# ================= НАГАДУВАННЯ (NEW 3.2) =================
+async def check_daily_reminders():
+    """Запускається планувальником. Шукає, що треба платити."""
+    print("🔔 Checking reminders...")
+    reminders = gs.get_due_reminders()
+    if not reminders: return
+
+    for item in reminders:
+        row_idx = item['row_idx']
+        PENDING_REMINDERS[str(row_idx)] = item  # Зберігаємо в пам'ять
+
+        text = (
+            f"🔔 <b>Нагадування:</b>\n"
+            f"📅 Треба оплатити: <b>{item['name']}</b>\n"
+            f"💰 Сума: <b>{item['amount']} грн</b>\n"
+            f"📂 Категорія: {item['category']}"
+        )
+
+        # Кнопка оплати
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Сплатити зараз", callback_data=f"pay_rem:{row_idx}")
+        ]])
+
+        for uid in USERS:
+            try:
+                await bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
+            except:
+                pass
+
+
+@dp.callback_query(F.data.startswith("pay_rem:"))
+async def process_reminder_payment(callback: CallbackQuery):
+    row_idx = callback.data.split(":")[1]
+
+    # Шукаємо дані про платіж
+    item = PENDING_REMINDERS.get(row_idx)
+
+    # Якщо бот перезапускався, пам'ять стерлась - оновлюємо
+    if not item:
+        reminders = gs.get_due_reminders()
+        for r in reminders:
+            if str(r['row_idx']) == row_idx:
+                item = r
+                break
+
+    if not item:
+        await callback.answer("❌ Помилка: запис не знайдено або вже сплачено.", show_alert=True)
+        await callback.message.edit_text(f"{callback.message.text}\n\n❌ <i>Дані втрачено, сплати вручну.</i>",
+                                         parse_mode="HTML")
+        return
+
+    # Виконуємо оплату
+    await callback.message.edit_text(f"{callback.message.text}\n\n⏳ <i>Обробка...</i>", parse_mode="HTML")
+
+    who = USERS.get(callback.from_user.id, "Bot")
+    date_now = datetime.now().strftime("%d.%m.%Y")
+
+    # 1. Запис в Транзакції
+    gs.add_transaction(date_now, item['category'], item['amount'], "Витрати", item['name'], "Auto-Reminder", who)
+
+    # 2. Оновлення дати в Нагадуваннях
+    gs.update_reminder_payment(item['row_idx'], date_now)
+
+    await callback.message.edit_text(
+        f"✅ <b>Сплачено!</b>\n"
+        f"▫️ {item['name']} (-{item['amount']} грн)\n"
+        f"📅 Наступне нагадування: наступного місяця.",
+        parse_mode="HTML"
+    )
+    await callback.answer("Успішно!")
+
+
+# ================= ВАЛЮТА =================
 @dp.message(F.text == "🇺🇸 Валюта")
 async def currency_menu(message: types.Message):
     await message.answer("💵 Операції з доларами:", reply_markup=currency_kb())
@@ -145,9 +217,7 @@ async def curr_amount(message: types.Message, state: FSMContext):
     try:
         val = float(message.text.replace(',', '.'))
         await state.update_data(amount_usd=val)
-
         data = await state.get_data()
-        # Для "Витратив" і "Отримав" курс не питаємо (він не впливає на грн)
         if data['op'] in ["🛒 Витратив $", "💰 Отримав $"]:
             await state.update_data(rate=0.0)
             await state.set_state(CurrencyForm.description)
@@ -180,33 +250,24 @@ async def curr_save(message: types.Message, state: FSMContext):
     note = message.text
     who = USERS[message.from_user.id]
     date = datetime.now().strftime("%d.%m.%Y")
-
     uah_val = usd * rate
 
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-
-    # 1. Визначаємо знак для сейфа (+ або -)
     usd_sign = usd if op in ["📥 Купив $", "💰 Отримав $"] else -usd
-
-    # 2. Запис в аркуш "Валюта"
     gs.add_currency_transaction(date, op, usd_sign, rate, uah_val, note)
 
-    # 3. Дублювання в основну таблицю (для історії руху гривні)
     msg = ""
     if op == "📥 Купив $":
         gs.add_transaction(date, "💵 Купівля валюти", uah_val, "Витрати", f"{usd}$ по {rate}", "Auto-Currency", who)
         msg = f"✅ Купив {usd}$ за {uah_val:.0f} грн.\nДодано в сейф."
-
     elif op == "📤 Продав $":
-        gs.add_transaction(date, "🔁 Обмін валют", uah_val, "Поповнення", f"Продав {usd}$ по {rate}", "Auto-Currency", who)
+        gs.add_transaction(date, "🔁 Обмін валют", uah_val, "Поповнення", f"Продав {usd}$ по {rate}", "Auto-Currency",
+                           who)
         msg = f"✅ Продав {usd}$ за {uah_val:.0f} грн.\nГривні зараховано."
-
     elif op == "💰 Отримав $":
-        # Записуємо як дохід з 0 грн, щоб було в історії
         gs.add_transaction(date, "💵 Валютний дохід", 0, "Поповнення", f"Отримав {usd}$ ({note})", "Auto-Currency", who)
         msg = f"✅ Отримав {usd}$ у сейф.\n(Гривня не змінилась)"
-
-    else:  # Витратив $
+    else:
         msg = f"✅ Витратив {usd}$ з сейфа.\n({note})"
 
     await message.answer(msg, reply_markup=main_kb())
@@ -415,8 +476,20 @@ async def main():
     print("📥 Loading categories...")
     EXPENSE_CATS, INCOME_CATS = gs.get_categories()
     print(f"✅ Loaded {len(EXPENSE_CATS)} expense cats.")
+
+    # ПЛАНУВАЛЬНИК:
+    # 1. Щоранку о 09:00 перевіряє рахунки (Оренда, Інтернет)
+    scheduler.add_job(check_daily_reminders, 'cron', hour=9, minute=0)
+
+    # 2. Щовечора о 21:00 нагадує записати витрати
     scheduler.add_job(evening_reminder, 'cron', hour=21, minute=0)
+
     scheduler.start()
+
+    # Запускаємо перевірку одразу при старті (для тесту), щоб ти побачив результат
+    # У продакшені це можна закоментувати, але хай буде для впевненості.
+    await check_daily_reminders()
+
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 

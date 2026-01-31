@@ -1,6 +1,7 @@
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
+from datetime import datetime, timedelta
+import calendar
 import re
 from config import SPREADSHEET_ID, SHEET_NAME
 
@@ -16,35 +17,15 @@ class GoogleSheetManager:
         self.client = gspread.authorize(self.creds)
 
     def _clean_amount(self, amount_str):
-        """
-        Перетворює будь-яке сміття з таблиці (2 600,00 грн, 1.000$, тощо) у чистий float.
-        """
-        if isinstance(amount_str, (int, float)):
-            return float(amount_str)
-
-        # 1. Конвертуємо в рядок
-        s = str(amount_str)
-
-        # 2. Видаляємо нерозривні пробіли (\xa0) і звичайні пробіли
-        # Це головна причина помилок у Google Sheets
-        s = s.replace('\xa0', '').replace(' ', '')
-
-        # 3. Видаляємо все, крім цифр, коми, крапки і мінуса
+        """Чистить формат чисел (пробіли, коми, валюти)."""
+        if isinstance(amount_str, (int, float)): return float(amount_str)
+        s = str(amount_str).replace('\xa0', '').replace(' ', '')
         s = re.sub(r'[^\d,.-]', '', s)
-
-        # 4. Логіка роздільників
-        # Якщо є і крапка і кома (напр. 1.000,50) -> видаляємо крапку (як роздільник тисяч)
-        if '.' in s and ',' in s:
-            s = s.replace('.', '')
-
-        # 5. Міняємо кому на крапку (для Python)
+        if '.' in s and ',' in s: s = s.replace('.', '')
         s = s.replace(',', '.')
-
         try:
             return float(s)
         except ValueError:
-            # Якщо все ще не вийшло - повертаємо 0, але пишемо в лог
-            # print(f"🔴 Failed clean: {amount_str} -> {s}")
             return 0.0
 
     # --- CATEGORIES ---
@@ -60,7 +41,7 @@ class GoogleSheetManager:
             return expense_cats, income_cats
         except Exception as e:
             print(f"🔴 Error reading categories: {e}")
-            return (["🛒 Продукти", "🏠 Оренда"], ["💰 Дохід"])
+            return (["🛒 Продукти"], ["💰 Дохід"])
 
     # --- MAIN TRANSACTIONS ---
     def add_transaction(self, date, category, amount, t_type, item_name, note, who):
@@ -131,7 +112,6 @@ class GoogleSheetManager:
             top_cats = sorted(month_categories.items(), key=lambda x: x[1], reverse=True)[:3]
             MONTHS_UA = {1: "Січень", 2: "Лютий", 3: "Березень", 4: "Квітень", 5: "Травень", 6: "Червень", 7: "Липень",
                          8: "Серпень", 9: "Вересень", 10: "Жовтень", 11: "Листопад", 12: "Грудень"}
-
             usd_balance = self.get_currency_balance()
 
             return {
@@ -190,7 +170,7 @@ class GoogleSheetManager:
     def get_currency_balance(self):
         try:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet("Валюта")
-            col_usd = sheet.col_values(3)  # 3-й стовпчик
+            col_usd = sheet.col_values(3)
             total = 0.0
             for val in col_usd[1:]:
                 total += self._clean_amount(val)
@@ -219,6 +199,86 @@ class GoogleSheetManager:
                 sheet.update_cell(cell.row, cell.col + 1, new_amount)
             except:
                 sheet.append_row([category, new_amount])
+            return True
+        except:
+            return False
+
+    # --- REMINDERS (SMART) ---
+    def get_due_reminders(self):
+        """Перевіряє, що треба оплатити (З урахуванням завчасної оплати)."""
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet("Нагадування")
+            all_values = sheet.get_all_values()
+            if len(all_values) < 2: return []
+
+            data_rows = all_values[1:]
+            due_items = []
+            now = datetime.now()
+
+            for i, row in enumerate(data_rows):
+                if len(row) < 4: continue
+
+                name = row[0]
+                try:
+                    day_to_pay = int(row[1])
+                except:
+                    continue
+
+                try:
+                    amount = self._clean_amount(row[2])
+                except:
+                    amount = 0.0
+
+                category = row[3]
+                last_paid_str = row[4] if len(row) > 4 else ""
+
+                # --- ЛОГІКА ПЕРЕВІРКИ ---
+                # 1. Розбираємо дату останньої оплати
+                last_paid_date = None
+                if last_paid_str:
+                    try:
+                        last_paid_date = datetime.strptime(last_paid_str, "%d.%m.%Y")
+                    except:
+                        pass
+
+                # 2. Визначаємо дедлайн у ЦЬОМУ місяці
+                try:
+                    this_month_due_date = datetime(now.year, now.month, day_to_pay)
+                except ValueError:
+                    last_day = calendar.monthrange(now.year, now.month)[1]
+                    this_month_due_date = datetime(now.year, now.month, last_day)
+
+                # 3. Чи оплачено?
+                is_paid = False
+                if last_paid_date:
+                    # Або платили в цьому місяці
+                    if last_paid_date.month == now.month and last_paid_date.year == now.year:
+                        is_paid = True
+                    # Або платили завчасно (за 5 днів до дедлайну)
+                    else:
+                        early_window = this_month_due_date - timedelta(days=5)
+                        if last_paid_date >= early_window:
+                            is_paid = True
+
+                if is_paid: continue
+
+                # 4. Настав час?
+                if now.day >= day_to_pay:
+                    due_items.append({
+                        "row_idx": i + 2,  # +2 бо i з 0 і є заголовок
+                        "name": name,
+                        "amount": amount,
+                        "category": category
+                    })
+            return due_items
+        except Exception as e:
+            print(f"🔴 Error reminders: {e}")
+            return []
+
+    def update_reminder_payment(self, row_idx, date_str):
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet("Нагадування")
+            sheet.update_cell(row_idx, 5, date_str)
             return True
         except:
             return False
