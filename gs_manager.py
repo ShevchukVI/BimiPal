@@ -43,6 +43,63 @@ class GoogleSheetManager:
             print(f"🔴 Error reading categories: {e}")
             return (["🛒 Продукти"], ["💰 Дохід"])
 
+    def get_month_history(self, month, year):
+        """Витягує всі транзакції за конкретний місяць і рік для звіту."""
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            all_values = sheet.get_all_values()
+            if len(all_values) <= 2: return None
+            data_rows = all_values[2:]
+
+            history = []
+            categories = {}
+            income = 0.0
+            expense = 0.0
+
+            for row in data_rows:
+                if not row or len(row) < 4: continue
+                try:
+                    # row[0] - Date, row[1] - Cat, row[2] - Amount, row[3] - Type, row[4] - Desc, row[6] - Who
+                    t_date = datetime.strptime(row[0], "%d.%m.%Y")
+                    if t_date.month == month and t_date.year == year:
+                        amount = self._clean_amount(row[2])
+                        t_type = row[3].strip()
+
+                        # Збираємо статистику
+                        if t_type in ["Поповнення", "Дохід", "Доходи"]:
+                            income += amount
+                        else:
+                            expense += amount
+                            cat = row[1]
+                            categories[cat] = categories.get(cat, 0) + amount
+
+                        # Зберігаємо транзакцію для списку
+                        history.append({
+                            "date": row[0],
+                            "cat": row[1],
+                            "amount": amount,
+                            "type": t_type,
+                            "desc": row[4] if len(row) > 4 else "",
+                            "who": row[6] if len(row) > 6 else ""
+                        })
+                except ValueError:
+                    continue
+
+            # Сортуємо транзакції за сумою (від найбільшої) для ТОП-10
+            top_transactions = sorted(history, key=lambda x: x['amount'], reverse=True)
+
+            return {
+                "income": income,
+                "expense": expense,
+                "balance": income - expense,
+                "categories": categories,
+                "transactions": top_transactions,  # Весь список
+                "top_10": top_transactions[:10]  # Тільки топ-10
+            }
+        except Exception as e:
+            print(f"🔴 Error history: {e}")
+            return None
+
     # --- MAIN TRANSACTIONS ---
     def add_transaction(self, date, category, amount, t_type, item_name, note, who):
         try:
@@ -85,6 +142,11 @@ class GoogleSheetManager:
             month_income = 0.0
             month_expense = 0.0
             total_wallet = 0.0
+
+            # --- НОВЕ: Окремі гаманці ---
+            wallet_vadym = 0.0
+            wallet_anya = 0.0
+
             month_categories = {}
 
             for row in data_rows:
@@ -92,13 +154,27 @@ class GoogleSheetManager:
                 try:
                     amount = self._clean_amount(row[2])
                     t_type = row[3].strip()
+                    who = row[6].strip() if len(row) > 6 else ""  # Беремо ім'я
+
                     t_date = datetime.strptime(row[0], "%d.%m.%Y")
 
+                    # 1. Рахуємо Глобальний Гаманець
                     if t_type in ["Поповнення", "Дохід", "Доходи"]:
                         total_wallet += amount
+                        # Розподіляємо по людях
+                        if "Вадим" in who:
+                            wallet_vadym += amount
+                        elif "Аня" in who:
+                            wallet_anya += amount
                     else:
                         total_wallet -= amount
+                        # Розподіляємо по людях
+                        if "Вадим" in who:
+                            wallet_vadym -= amount
+                        elif "Аня" in who:
+                            wallet_anya -= amount
 
+                    # 2. Рахуємо статистику за ПОТОЧНИЙ місяць
                     if t_date.month == now.month and t_date.year == now.year:
                         if t_type in ["Поповнення", "Дохід", "Доходи"]:
                             month_income += amount
@@ -119,6 +195,11 @@ class GoogleSheetManager:
                 "expense": month_expense,
                 "balance": month_income - month_expense,
                 "total_wallet": total_wallet,
+
+                # Повертаємо нові значення
+                "wallet_vadym": wallet_vadym,
+                "wallet_anya": wallet_anya,
+
                 "usd_wallet": usd_balance,
                 "top_cats": top_cats,
                 "month_name": MONTHS_UA.get(now.month, "Цей місяць"),

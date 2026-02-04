@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sys
+import reports  # Модуль генерації PDF
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ChatAction
@@ -46,6 +47,11 @@ class CurrencyForm(StatesGroup):
     description = State()
 
 
+class ReportForm(StatesGroup):
+    year = State()
+    month = State()
+
+
 # --- КЛАВІАТУРИ ---
 def main_kb():
     kb = [
@@ -58,9 +64,10 @@ def main_kb():
 
 def other_kb():
     kb = [
-        [KeyboardButton(text="🇺🇸 Валюта"), KeyboardButton(text="🍰 Діаграма")],
-        [KeyboardButton(text="📉 Звіт (Тиждень)"), KeyboardButton(text="🔔 Перевірити ліміти")],
-        [KeyboardButton(text="⚙️ Змінити ліміт"), KeyboardButton(text="🔙 Назад")]
+        [KeyboardButton(text="🇺🇸 Валюта"), KeyboardButton(text="📄 Архів звітів")],
+        [KeyboardButton(text="🍰 Діаграма"), KeyboardButton(text="📉 Звіт (Тиждень)")],
+        [KeyboardButton(text="🔔 Перевірити ліміти"), KeyboardButton(text="⚙️ Змінити ліміт")],
+        [KeyboardButton(text="🔙 Назад")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
@@ -126,29 +133,107 @@ async def cmd_restart(message: types.Message):
     sys.exit(0)
 
 
-# ================= НАГАДУВАННЯ (NEW 3.2) =================
+# ================= АРХІВ ЗВІТІВ (PDF) =================
+@dp.message(F.text == "📄 Архів звітів")
+async def report_start(message: types.Message, state: FSMContext):
+    years_kb = [
+        [KeyboardButton(text="2025"), KeyboardButton(text="2026")],
+        [KeyboardButton(text="🔙 Назад")]
+    ]
+    await state.set_state(ReportForm.year)
+    await message.answer("За який рік потрібен звіт?",
+                         reply_markup=ReplyKeyboardMarkup(keyboard=years_kb, resize_keyboard=True))
+
+
+@dp.message(ReportForm.year)
+async def report_year_chosen(message: types.Message, state: FSMContext):
+    if message.text == "🔙 Назад":
+        await state.clear()
+        await message.answer("Скасовано.", reply_markup=other_kb())
+        return
+
+    try:
+        year = int(message.text)
+        await state.update_data(year=year)
+
+        months_kb = [
+            [KeyboardButton(text="Січень"), KeyboardButton(text="Лютий"), KeyboardButton(text="Березень")],
+            [KeyboardButton(text="Квітень"), KeyboardButton(text="Травень"), KeyboardButton(text="Червень")],
+            [KeyboardButton(text="Липень"), KeyboardButton(text="Серпень"), KeyboardButton(text="Вересень")],
+            [KeyboardButton(text="Жовтень"), KeyboardButton(text="Листопад"), KeyboardButton(text="Грудень")],
+            [KeyboardButton(text="🔙 Назад")]
+        ]
+        await state.set_state(ReportForm.month)
+        await message.answer("Обери місяць:",
+                             reply_markup=ReplyKeyboardMarkup(keyboard=months_kb, resize_keyboard=True))
+    except:
+        await message.answer("Введи рік цифрами (наприклад: 2026)")
+
+
+@dp.message(ReportForm.month)
+async def report_month_chosen(message: types.Message, state: FSMContext):
+    if message.text == "🔙 Назад":
+        await state.set_state(ReportForm.year)
+        await message.answer("Обери рік:")
+        return
+
+    month_map = {
+        "Січень": 1, "Лютий": 2, "Березень": 3, "Квітень": 4, "Травень": 5, "Червень": 6,
+        "Липень": 7, "Серпень": 8, "Вересень": 9, "Жовтень": 10, "Листопад": 11, "Грудень": 12
+    }
+
+    month_name = message.text
+    month_num = month_map.get(month_name)
+
+    if not month_num:
+        await message.answer("Будь ласка, обери місяць із клавіатури.")
+        return
+
+    data_state = await state.get_data()
+    year = data_state['year']
+
+    await message.answer(f"⏳ Генерую PDF-звіт за {month_name} {year}...", reply_markup=other_kb())
+    await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_DOCUMENT)
+
+    data = gs.get_month_history(month_num, year)
+    if not data or not data['transactions']:
+        await message.answer(f"❌ Немає даних за {month_name} {year}.")
+        await state.clear()
+        return
+
+    try:
+        pdf_buffer = reports.generate_monthly_report(data, month_name, year)
+        file = BufferedInputFile(pdf_buffer.read(), filename=f"Report_{month_name}_{year}.pdf")
+        await message.answer_document(
+            file,
+            caption=f"📊 Твій фінансовий звіт за <b>{month_name} {year}</b> готовий!",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await message.answer(f"❌ Помилка генерації: {e}")
+        print(f"PDF Error: {e}")
+
+    await state.clear()
+
+
+# ================= НАГАДУВАННЯ =================
 async def check_daily_reminders():
-    """Запускається планувальником. Шукає, що треба платити."""
     print("🔔 Checking reminders...")
     reminders = gs.get_due_reminders()
     if not reminders: return
 
     for item in reminders:
         row_idx = item['row_idx']
-        PENDING_REMINDERS[str(row_idx)] = item  # Зберігаємо в пам'ять
-
+        PENDING_REMINDERS[str(row_idx)] = item
         text = (
             f"🔔 <b>Нагадування:</b>\n"
             f"📅 Треба оплатити: <b>{item['name']}</b>\n"
             f"💰 Сума: <b>{item['amount']} грн</b>\n"
             f"📂 Категорія: {item['category']}"
         )
-
-        # Кнопка оплати
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="✅ Сплатити зараз", callback_data=f"pay_rem:{row_idx}")
         ]])
-
         for uid in USERS:
             try:
                 await bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
@@ -159,11 +244,8 @@ async def check_daily_reminders():
 @dp.callback_query(F.data.startswith("pay_rem:"))
 async def process_reminder_payment(callback: CallbackQuery):
     row_idx = callback.data.split(":")[1]
-
-    # Шукаємо дані про платіж
     item = PENDING_REMINDERS.get(row_idx)
 
-    # Якщо бот перезапускався, пам'ять стерлась - оновлюємо
     if not item:
         reminders = gs.get_due_reminders()
         for r in reminders:
@@ -177,16 +259,11 @@ async def process_reminder_payment(callback: CallbackQuery):
                                          parse_mode="HTML")
         return
 
-    # Виконуємо оплату
     await callback.message.edit_text(f"{callback.message.text}\n\n⏳ <i>Обробка...</i>", parse_mode="HTML")
-
     who = USERS.get(callback.from_user.id, "Bot")
     date_now = datetime.now().strftime("%d.%m.%Y")
 
-    # 1. Запис в Транзакції
     gs.add_transaction(date_now, item['category'], item['amount'], "Витрати", item['name'], "Auto-Reminder", who)
-
-    # 2. Оновлення дати в Нагадуваннях
     gs.update_reminder_payment(item['row_idx'], date_now)
 
     await callback.message.edit_text(
@@ -261,20 +338,18 @@ async def curr_save(message: types.Message, state: FSMContext):
         gs.add_transaction(date, "💵 Купівля валюти", uah_val, "Витрати", f"{usd}$ по {rate}", "Auto-Currency", who)
         msg = f"✅ Купив {usd}$ за {uah_val:.0f} грн.\nДодано в сейф."
     elif op == "📤 Продав $":
-        gs.add_transaction(date, "🔁 Обмін валют", uah_val, "Поповнення", f"Продав {usd}$ по {rate}", "Auto-Currency",
-                           who)
+        gs.add_transaction(date, "🔁 Обмін валют", uah_val, "Поповнення", f"Продав {usd}$ по {rate}", "Auto-Currency", who)
         msg = f"✅ Продав {usd}$ за {uah_val:.0f} грн.\nГривні зараховано."
     elif op == "💰 Отримав $":
         gs.add_transaction(date, "💵 Валютний дохід", 0, "Поповнення", f"Отримав {usd}$ ({note})", "Auto-Currency", who)
         msg = f"✅ Отримав {usd}$ у сейф.\n(Гривня не змінилась)"
     else:
         msg = f"✅ Витратив {usd}$ з сейфа.\n({note})"
-
     await message.answer(msg, reply_markup=main_kb())
     await state.clear()
 
 
-# ================= СТАТИСТИКА =================
+# ================= СТАТИСТИКА, ЛІМІТИ, ІНШЕ =================
 @dp.message(F.text == "📊 Статистика")
 async def show_stats(message: types.Message):
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
@@ -282,9 +357,13 @@ async def show_stats(message: types.Message):
     if not stats:
         await message.answer("❌ Помилка.")
         return
+
+    # Формуємо нове повідомлення з розділеними гаманцями
     text = (
-        f"🏦 <b>Гаманець UAH:</b> {stats['total_wallet']:,.0f} грн\n"
-        f"🇺🇸 <b>Гаманець USD:</b> {stats['usd_wallet']:,.0f} $\n"
+        f"🧔‍♂️ <b>Вадим:</b> {stats['wallet_vadym']:,.0f} грн\n"
+        f"👩‍🦰 <b>Аня:</b> {stats['wallet_anya']:,.0f} грн\n"
+        f"🏦 <b>Разом UAH:</b> {stats['total_wallet']:,.0f} грн\n"
+        f"🇺🇸 <b>Сейф USD:</b> {stats['usd_wallet']:,.0f} $\n"
         f"➖➖➖➖➖➖➖➖➖➖\n"
         f"📅 <b>{stats['month_name']} (Потік):</b>\n"
         f"📉 Витрати: {stats['expense']:,.0f} грн\n"
@@ -298,7 +377,6 @@ async def show_stats(message: types.Message):
     await message.answer(text, parse_mode="HTML")
 
 
-# ================= ЗВІТИ ТА ЛІМІТИ =================
 @dp.message(F.text == "🍰 Діаграма")
 async def send_chart(message: types.Message):
     if message.from_user.id not in USERS: return
@@ -388,7 +466,7 @@ async def undo_last(message: types.Message):
         await message.answer("❌ Помилка.")
 
 
-# ================= СТАНДАРТНІ ОПЕРАЦІЇ =================
+# ================= СТАНДАРТНІ ВИТРАТИ =================
 @dp.message(F.text == "⚡️ Швидка витрата")
 async def quick_start(message: types.Message, state: FSMContext):
     await state.set_state(FinanceForm.quick_amount)
@@ -476,20 +554,10 @@ async def main():
     print("📥 Loading categories...")
     EXPENSE_CATS, INCOME_CATS = gs.get_categories()
     print(f"✅ Loaded {len(EXPENSE_CATS)} expense cats.")
-
-    # ПЛАНУВАЛЬНИК:
-    # 1. Щоранку о 09:00 перевіряє рахунки (Оренда, Інтернет)
     scheduler.add_job(check_daily_reminders, 'cron', hour=9, minute=0)
-
-    # 2. Щовечора о 21:00 нагадує записати витрати
     scheduler.add_job(evening_reminder, 'cron', hour=21, minute=0)
-
     scheduler.start()
-
-    # Запускаємо перевірку одразу при старті (для тесту), щоб ти побачив результат
-    # У продакшені це можна закоментувати, але хай буде для впевненості.
     await check_daily_reminders()
-
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
