@@ -17,7 +17,6 @@ class GoogleSheetManager:
         self.client = gspread.authorize(self.creds)
 
     def _clean_amount(self, amount_str):
-        """Чистить формат чисел (пробіли, коми, валюти)."""
         if isinstance(amount_str, (int, float)): return float(amount_str)
         s = str(amount_str).replace('\xa0', '').replace(' ', '')
         s = re.sub(r'[^\d,.-]', '', s)
@@ -43,64 +42,7 @@ class GoogleSheetManager:
             print(f"🔴 Error reading categories: {e}")
             return (["🛒 Продукти"], ["💰 Дохід"])
 
-    def get_month_history(self, month, year):
-        """Витягує всі транзакції за конкретний місяць і рік для звіту."""
-        try:
-            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-            all_values = sheet.get_all_values()
-            if len(all_values) <= 2: return None
-            data_rows = all_values[2:]
-
-            history = []
-            categories = {}
-            income = 0.0
-            expense = 0.0
-
-            for row in data_rows:
-                if not row or len(row) < 4: continue
-                try:
-                    # row[0] - Date, row[1] - Cat, row[2] - Amount, row[3] - Type, row[4] - Desc, row[6] - Who
-                    t_date = datetime.strptime(row[0], "%d.%m.%Y")
-                    if t_date.month == month and t_date.year == year:
-                        amount = self._clean_amount(row[2])
-                        t_type = row[3].strip()
-
-                        # Збираємо статистику
-                        if t_type in ["Поповнення", "Дохід", "Доходи"]:
-                            income += amount
-                        else:
-                            expense += amount
-                            cat = row[1]
-                            categories[cat] = categories.get(cat, 0) + amount
-
-                        # Зберігаємо транзакцію для списку
-                        history.append({
-                            "date": row[0],
-                            "cat": row[1],
-                            "amount": amount,
-                            "type": t_type,
-                            "desc": row[4] if len(row) > 4 else "",
-                            "who": row[6] if len(row) > 6 else ""
-                        })
-                except ValueError:
-                    continue
-
-            # Сортуємо транзакції за сумою (від найбільшої) для ТОП-10
-            top_transactions = sorted(history, key=lambda x: x['amount'], reverse=True)
-
-            return {
-                "income": income,
-                "expense": expense,
-                "balance": income - expense,
-                "categories": categories,
-                "transactions": top_transactions,  # Весь список
-                "top_10": top_transactions[:10]  # Тільки топ-10
-            }
-        except Exception as e:
-            print(f"🔴 Error history: {e}")
-            return None
-
-    # --- MAIN TRANSACTIONS ---
+    # --- TRANSACTIONS ---
     def add_transaction(self, date, category, amount, t_type, item_name, note, who):
         try:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
@@ -117,16 +59,74 @@ class GoogleSheetManager:
             except:
                 return False
 
+    def add_transfer(self, amount, note, from_who, to_who):
+        """Створює транзакцію переказу між балансами."""
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            date_now = datetime.now().strftime("%d.%m.%Y")
+            # 1. Списання
+            row_out = [date_now, "🔄 Переказ", amount, "Витрати", f"Переказ -> {to_who}", note, from_who]
+            # 2. Зарахування
+            row_in = [date_now, "🔄 Переказ", amount, "Поповнення", f"Отримано <- {from_who}", note, to_who]
+
+            sheet.insert_row(row_in, 3)
+            sheet.insert_row(row_out, 3)
+            return True
+        except Exception as e:
+            print(f"🔴 Error transfer: {e}")
+            return False
+
     def undo_last_transaction(self):
         try:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
             row_values = sheet.row_values(3)
             if not row_values or row_values[0] == "Дата": return None
             sheet.delete_rows(3)
-            return {"date": row_values[0], "category": row_values[1], "amount": row_values[2],
-                    "desc": row_values[4] if len(row_values) > 4 else ""}
+            return {"date": row_values[0], "category": row_values[1], "amount": row_values[2]}
         except:
             return None
+
+    # --- HISTORY CONTROL (v3.3) ---
+    def get_last_transactions(self, page=1, page_size=5):
+        """Повертає історію з пагінацією."""
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+
+            # Рахуємо діапазон рядків
+            # Сторінка 1: рядки 3..7
+            # Сторінка 2: рядки 8..12
+            start_row = 3 + (page - 1) * page_size
+            end_row = start_row + page_size - 1
+
+            rows = sheet.get_values(f"A{start_row}:G{end_row}")
+
+            history = []
+            for i, row in enumerate(rows):
+                row_idx = start_row + i
+                if not row or len(row) < 3: continue
+
+                history.append({
+                    "id": row_idx,
+                    "date": row[0],
+                    "category": row[1],
+                    "amount": self._clean_amount(row[2]),
+                    "desc": row[4] if len(row) > 4 else "",
+                    "who": row[6] if len(row) > 6 else ""
+                })
+            return history
+        except Exception as e:
+            print(f"🔴 Error history: {e}")
+            return []
+
+    def delete_transaction_by_row(self, row_idx):
+        """Видаляє конкретний рядок з таблиці."""
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            sheet.delete_rows(int(row_idx))
+            return True
+        except Exception as e:
+            print(f"🔴 Error delete: {e}")
+            return False
 
     # --- STATS ---
     def get_month_stats(self):
@@ -142,11 +142,8 @@ class GoogleSheetManager:
             month_income = 0.0
             month_expense = 0.0
             total_wallet = 0.0
-
-            # --- НОВЕ: Окремі гаманці ---
             wallet_vadym = 0.0
             wallet_anya = 0.0
-
             month_categories = {}
 
             for row in data_rows:
@@ -154,27 +151,22 @@ class GoogleSheetManager:
                 try:
                     amount = self._clean_amount(row[2])
                     t_type = row[3].strip()
-                    who = row[6].strip() if len(row) > 6 else ""  # Беремо ім'я
-
+                    who = row[6].strip() if len(row) > 6 else ""
                     t_date = datetime.strptime(row[0], "%d.%m.%Y")
 
-                    # 1. Рахуємо Глобальний Гаманець
                     if t_type in ["Поповнення", "Дохід", "Доходи"]:
                         total_wallet += amount
-                        # Розподіляємо по людях
                         if "Вадим" in who:
                             wallet_vadym += amount
                         elif "Аня" in who:
                             wallet_anya += amount
                     else:
                         total_wallet -= amount
-                        # Розподіляємо по людях
                         if "Вадим" in who:
                             wallet_vadym -= amount
                         elif "Аня" in who:
                             wallet_anya -= amount
 
-                    # 2. Рахуємо статистику за ПОТОЧНИЙ місяць
                     if t_date.month == now.month and t_date.year == now.year:
                         if t_type in ["Поповнення", "Дохід", "Доходи"]:
                             month_income += amount
@@ -195,11 +187,8 @@ class GoogleSheetManager:
                 "expense": month_expense,
                 "balance": month_income - month_expense,
                 "total_wallet": total_wallet,
-
-                # Повертаємо нові значення
                 "wallet_vadym": wallet_vadym,
                 "wallet_anya": wallet_anya,
-
                 "usd_wallet": usd_balance,
                 "top_cats": top_cats,
                 "month_name": MONTHS_UA.get(now.month, "Цей місяць"),
@@ -235,6 +224,45 @@ class GoogleSheetManager:
             return {"income": income, "expense": expense,
                     "top_cats": sorted(categories.items(), key=lambda x: x[1], reverse=True)[:5]}
         except:
+            return None
+
+    # --- REPORTS (PDF) ---
+    def get_month_history(self, month, year):
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            all_values = sheet.get_all_values()
+            if len(all_values) <= 2: return None
+            data_rows = all_values[2:]
+            history = []
+            categories = {}
+            income = 0.0
+            expense = 0.0
+            for row in data_rows:
+                if not row or len(row) < 4: continue
+                try:
+                    t_date = datetime.strptime(row[0], "%d.%m.%Y")
+                    if t_date.month == month and t_date.year == year:
+                        amount = self._clean_amount(row[2])
+                        t_type = row[3].strip()
+                        if t_type in ["Поповнення", "Дохід", "Доходи"]:
+                            income += amount
+                        else:
+                            expense += amount
+                            cat = row[1]
+                            categories[cat] = categories.get(cat, 0) + amount
+                        history.append({
+                            "date": row[0], "cat": row[1], "amount": amount, "type": t_type,
+                            "desc": row[4] if len(row) > 4 else "", "who": row[6] if len(row) > 6 else ""
+                        })
+                except ValueError:
+                    continue
+            top_transactions = sorted(history, key=lambda x: x['amount'], reverse=True)
+            return {
+                "income": income, "expense": expense, "balance": income - expense,
+                "categories": categories, "transactions": top_transactions, "top_10": top_transactions[:10]
+            }
+        except Exception as e:
+            print(f"🔴 Error history: {e}")
             return None
 
     # --- CURRENCY ---
@@ -286,35 +314,27 @@ class GoogleSheetManager:
 
     # --- REMINDERS (SMART) ---
     def get_due_reminders(self):
-        """Перевіряє, що треба оплатити (З урахуванням завчасної оплати)."""
         try:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet("Нагадування")
             all_values = sheet.get_all_values()
             if len(all_values) < 2: return []
-
             data_rows = all_values[1:]
             due_items = []
             now = datetime.now()
-
             for i, row in enumerate(data_rows):
                 if len(row) < 4: continue
-
                 name = row[0]
                 try:
                     day_to_pay = int(row[1])
                 except:
                     continue
-
                 try:
                     amount = self._clean_amount(row[2])
                 except:
                     amount = 0.0
-
                 category = row[3]
                 last_paid_str = row[4] if len(row) > 4 else ""
 
-                # --- ЛОГІКА ПЕРЕВІРКИ ---
-                # 1. Розбираємо дату останньої оплати
                 last_paid_date = None
                 if last_paid_str:
                     try:
@@ -322,35 +342,23 @@ class GoogleSheetManager:
                     except:
                         pass
 
-                # 2. Визначаємо дедлайн у ЦЬОМУ місяці
                 try:
                     this_month_due_date = datetime(now.year, now.month, day_to_pay)
                 except ValueError:
                     last_day = calendar.monthrange(now.year, now.month)[1]
                     this_month_due_date = datetime(now.year, now.month, last_day)
 
-                # 3. Чи оплачено?
                 is_paid = False
                 if last_paid_date:
-                    # Або платили в цьому місяці
                     if last_paid_date.month == now.month and last_paid_date.year == now.year:
                         is_paid = True
-                    # Або платили завчасно (за 5 днів до дедлайну)
                     else:
                         early_window = this_month_due_date - timedelta(days=5)
-                        if last_paid_date >= early_window:
-                            is_paid = True
-
+                        if last_paid_date >= early_window: is_paid = True
                 if is_paid: continue
 
-                # 4. Настав час?
                 if now.day >= day_to_pay:
-                    due_items.append({
-                        "row_idx": i + 2,  # +2 бо i з 0 і є заголовок
-                        "name": name,
-                        "amount": amount,
-                        "category": category
-                    })
+                    due_items.append({"row_idx": i + 2, "name": name, "amount": amount, "category": category})
             return due_items
         except Exception as e:
             print(f"🔴 Error reminders: {e}")
