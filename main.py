@@ -468,8 +468,10 @@ async def report_month(message: types.Message, state: FSMContext):
 
     try:
         pdf = await run_sync(reports.generate_monthly_report, data, message.text, year)
-        await message.answer_document(BufferedInputFile(pdf.read(), filename=f"Report.pdf"), caption="📊 Звіт готовий",
-                                      parse_mode="HTML")
+        # Динамічна назва файлу: Report_Лютий_2026.pdf
+        filename = f"Report_{message.text}_{year}.pdf"
+        await message.answer_document(BufferedInputFile(pdf.read(), filename=filename),
+                                      caption=f"📊 Звіт за <b>{message.text} {year}</b> готовий!", parse_mode="HTML")
     except Exception as e:
         await message.answer(f"❌ Помилка: {e}")
 
