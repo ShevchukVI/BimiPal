@@ -64,9 +64,7 @@ class GoogleSheetManager:
         try:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
             date_now = datetime.now().strftime("%d.%m.%Y")
-            # 1. Списання
             row_out = [date_now, "🔄 Переказ", amount, "Витрати", f"Переказ -> {to_who}", note, from_who]
-            # 2. Зарахування
             row_in = [date_now, "🔄 Переказ", amount, "Поповнення", f"Отримано <- {from_who}", note, to_who]
 
             sheet.insert_row(row_in, 3)
@@ -91,10 +89,6 @@ class GoogleSheetManager:
         """Повертає історію з пагінацією."""
         try:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-
-            # Рахуємо діапазон рядків
-            # Сторінка 1: рядки 3..7
-            # Сторінка 2: рядки 8..12
             start_row = 3 + (page - 1) * page_size
             end_row = start_row + page_size - 1
 
@@ -151,10 +145,14 @@ class GoogleSheetManager:
                 try:
                     amount = self._clean_amount(row[2])
                     t_type = row[3].strip()
+                    cat = row[1].strip()
                     who = row[6].strip() if len(row) > 6 else ""
-                    t_date = datetime.strptime(row[0], "%d.%m.%Y")
+                    t_date = datetime.strptime(row[0].strip(), "%d.%m.%Y")
 
-                    if t_type in ["Поповнення", "Дохід", "Доходи"]:
+                    # 🛡 БРОНЯ: перевіряємо і тип, і саму назву категорії
+                    is_income = t_type in ["Поповнення", "Дохід", "Доходи"] or "Доход" in cat or "Поповнення" in cat
+
+                    if is_income:
                         total_wallet += amount
                         if "Вадим" in who:
                             wallet_vadym += amount
@@ -168,13 +166,13 @@ class GoogleSheetManager:
                             wallet_anya -= amount
 
                     if t_date.month == now.month and t_date.year == now.year:
-                        if t_type in ["Поповнення", "Дохід", "Доходи"]:
+                        if is_income:
                             month_income += amount
                         else:
                             month_expense += amount
-                            cat = row[1]
                             month_categories[cat] = month_categories.get(cat, 0) + amount
-                except ValueError:
+                except Exception:
+                    # БРОНЯ: Якщо рядок "зламаний", просто пропускаємо його і йдемо далі
                     continue
 
             top_cats = sorted(month_categories.items(), key=lambda x: x[1], reverse=True)[:3]
@@ -211,16 +209,21 @@ class GoogleSheetManager:
             for row in data_rows:
                 if not row or len(row) < 4 or not row[0]: continue
                 try:
-                    t_date = datetime.strptime(row[0], "%d.%m.%Y")
-                except ValueError:
+                    t_date = datetime.strptime(row[0].strip(), "%d.%m.%Y")
+                    if 0 <= (now - t_date).days <= 7:
+                        amount = self._clean_amount(row[2])
+                        t_type = row[3].strip()
+                        cat = row[1].strip()
+
+                        is_income = t_type in ["Поповнення", "Дохід", "Доходи"] or "Доход" in cat or "Поповнення" in cat
+
+                        if is_income:
+                            income += amount
+                        else:
+                            expense += amount
+                            categories[cat] = categories.get(cat, 0) + amount
+                except Exception:
                     continue
-                if 0 <= (now - t_date).days <= 7:
-                    amount = self._clean_amount(row[2])
-                    if row[3].strip() in ["Поповнення", "Дохід", "Доходи"]:
-                        income += amount
-                    else:
-                        expense += amount
-                        categories[row[1]] = categories.get(row[1], 0) + amount
             return {"income": income, "expense": expense,
                     "top_cats": sorted(categories.items(), key=lambda x: x[1], reverse=True)[:5]}
         except:
@@ -233,33 +236,57 @@ class GoogleSheetManager:
             all_values = sheet.get_all_values()
             if len(all_values) <= 2: return None
             data_rows = all_values[2:]
-            history = []
-            categories = {}
+
             income = 0.0
             expense = 0.0
+            categories_dict = {}
+
             for row in data_rows:
                 if not row or len(row) < 4: continue
                 try:
-                    t_date = datetime.strptime(row[0], "%d.%m.%Y")
+                    t_date = datetime.strptime(row[0].strip(), "%d.%m.%Y")
                     if t_date.month == month and t_date.year == year:
                         amount = self._clean_amount(row[2])
                         t_type = row[3].strip()
-                        if t_type in ["Поповнення", "Дохід", "Доходи"]:
+                        cat = row[1].strip()
+                        desc = row[4].strip() if len(row) > 4 else ""
+                        who = row[6].strip() if len(row) > 6 else ""
+
+                        is_income = t_type in ["Поповнення", "Дохід", "Доходи"] or "Доход" in cat or "Поповнення" in cat
+
+                        if is_income:
                             income += amount
                         else:
                             expense += amount
-                            cat = row[1]
-                            categories[cat] = categories.get(cat, 0) + amount
-                        history.append({
-                            "date": row[0], "cat": row[1], "amount": amount, "type": t_type,
-                            "desc": row[4] if len(row) > 4 else "", "who": row[6] if len(row) > 6 else ""
-                        })
-                except ValueError:
+                            if cat not in categories_dict:
+                                categories_dict[cat] = {'total': 0.0, 'txs': []}
+
+                            categories_dict[cat]['total'] += amount
+                            categories_dict[cat]['txs'].append({
+                                "date": row[0], "amount": amount, "desc": desc, "who": who
+                            })
+                except Exception:
+                    # БРОНЯ: ігнор рядків, які неможливо обробити
                     continue
-            top_transactions = sorted(history, key=lambda x: x['amount'], reverse=True)
+
+            if expense == 0 and income == 0:
+                return None
+
+            # Групування та сортування категорій і ТОП-3 транзакцій
+            sorted_cats = sorted(
+                [{"name": k, "total": v['total'], "txs": v['txs']} for k, v in categories_dict.items()],
+                key=lambda x: x['total'],
+                reverse=True
+            )
+
+            for cat in sorted_cats:
+                cat['top_txs'] = sorted(cat['txs'], key=lambda x: x['amount'], reverse=True)[:3]
+
             return {
-                "income": income, "expense": expense, "balance": income - expense,
-                "categories": categories, "transactions": top_transactions, "top_10": top_transactions[:10]
+                "income": income,
+                "expense": expense,
+                "balance": income - expense,
+                "grouped_categories": sorted_cats
             }
         except Exception as e:
             print(f"🔴 Error history: {e}")
