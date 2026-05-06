@@ -3,17 +3,19 @@ from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib import colors
+from reportlab.platypus import Paragraph
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 import matplotlib
 
-matplotlib.use('Agg')  # <--- ВАЖЛИВО: Додав сюди теж
-import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
+matplotlib.use('Agg')
 import io
-import re
 import os
+import re
+import visuals
 
-FONT_FILE = 'arial.ttf'
-FONT_NAME = 'Arial'
+# Змінили на Montserrat!
+FONT_FILE = 'Montserrat-Regular.ttf'
+FONT_NAME = 'Montserrat'
 
 try:
     if os.path.exists(FONT_FILE):
@@ -23,13 +25,6 @@ try:
 except:
     FONT_NAME = 'Helvetica'
 
-try:
-    if os.path.exists(FONT_FILE):
-        fm.fontManager.addfont(FONT_FILE)
-        plt.rcParams['font.family'] = FONT_NAME
-except:
-    pass
-
 
 def clean_text(text):
     if not text: return ""
@@ -38,100 +33,179 @@ def clean_text(text):
 
 def draw_header(c, width, height, month_name, year):
     c.setFillColor(colors.HexColor("#2C3E50"))
-    c.rect(0, height - 120, width, 120, stroke=0, fill=1)
+    c.rect(0, height - 100, width, 100, stroke=0, fill=1)
     c.setFillColor(colors.white)
-    c.setFont(FONT_NAME, 30)
-    c.drawString(50, height - 60, "Фінансовий звіт")
-    c.setFont(FONT_NAME, 18)
-    c.setFillColor(colors.HexColor("#BDC3C7"))
-    c.drawString(50, height - 90, f"{month_name} {year}")
+    c.setFont(FONT_NAME, 26)
+    c.drawString(40, height - 50, f"Фінансовий звіт: {month_name} {year}")
     c.setFont(FONT_NAME, 10)
-    c.drawRightString(width - 50, height - 60, "BimiPal Finance Bot 🤖")
+    c.drawRightString(width - 40, height - 50, "BimiPal Finance Bot")
+
+
+def check_page_break(c, current_y, width, height, month_name, year, required_space=50):
+    if current_y < required_space:
+        c.showPage()
+        draw_header(c, width, height, month_name, year)
+        return height - 130
+    return current_y
 
 
 def generate_monthly_report(data, month_name, year):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
+
     draw_header(c, width, height, month_name, year)
 
-    y_cards = height - 190
-    card_width = 155;
-    card_height = 60;
+    y = height - 140
+    card_width = 155
+    card_height = 50
     gap = 20
 
     def draw_card(x, title, value, color_hex):
         c.setFillColor(colors.HexColor("#ECF0F1"))
-        c.roundRect(x, y_cards, card_width, card_height, 6, stroke=0, fill=1)
+        c.roundRect(x, y, card_width, card_height, 4, stroke=0, fill=1)
         c.setFillColor(colors.HexColor("#7F8C8D"))
         c.setFont(FONT_NAME, 9)
-        c.drawString(x + 15, y_cards + 35, title)
+        c.drawString(x + 10, y + 30, title)
         c.setFillColor(colors.HexColor(color_hex))
-        c.setFont(FONT_NAME, 16)
-        c.drawString(x + 15, y_cards + 15, value)
+        c.setFont(FONT_NAME, 14)
+        c.drawString(x + 10, y + 10, value)
 
-    draw_card(50, "ЗАГАЛЬНИЙ ДОХІД", f"{data['income']:,.0f} грн", "#27AE60")
-    draw_card(50 + card_width + gap, "ЗАГАЛЬНІ ВИТРАТИ", f"{data['expense']:,.0f} грн", "#C0392B")
+    draw_card(40, "ЗАГАЛЬНИЙ ДОХІД", f"{data['income']:,.0f} грн", "#27AE60")
+    draw_card(40 + card_width + gap, "ЗАГАЛЬНІ ВИТРАТИ", f"{data['expense']:,.0f} грн", "#C0392B")
     bal_color = "#2980B9" if data['balance'] >= 0 else "#C0392B"
-    draw_card(50 + (card_width + gap) * 2, "ЗАЛИШОК (Net)", f"{data['balance']:,.0f} грн", bal_color)
+    draw_card(40 + (card_width + gap) * 2, "ЗАЛИШОК (Net)", f"{data['balance']:,.0f} грн", bal_color)
 
-    if data['categories']:
-        sorted_cats = sorted(data['categories'].items(), key=lambda x: x[1], reverse=True)
-        labels = [clean_text(k) for k, v in sorted_cats[:6]]
-        sizes = [v for k, v in sorted_cats[:6]]
-        others = sum([v for k, v in sorted_cats[6:]])
-        if others > 0: labels.append("Інше"); sizes.append(others)
+    y -= 40
 
-        fig, ax = plt.subplots(figsize=(6, 6))
-        wedges, texts, autotexts = ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90, pctdistance=0.85,
-                                          textprops={'fontsize': 10})
-        centre_circle = plt.Circle((0, 0), 0.70, fc='white')
-        fig.gca().add_artist(centre_circle)
-        ax.axis('equal')
-        plt.title(f"Структура витрат", fontsize=14, pad=20)
+    # Генеруємо та малюємо гістограму
+    chart_data = {cat['name']: cat['total'] for cat in data['grouped_categories']}
+    if chart_data:
+        chart_buf = visuals.generate_pie_chart(chart_data, title="")
+        if chart_buf:
+            from reportlab.lib.utils import ImageReader
+            img = ImageReader(chart_buf)
+            img_width = 450
+            fig_height = max(6, len(chart_data) * 0.4)
+            img_height = (img_width / 10) * fig_height
 
-        img_buf = io.BytesIO()
-        plt.savefig(img_buf, format='png', bbox_inches='tight', transparent=True)
-        plt.close()
-        img_buf.seek(0)
-        from reportlab.lib.utils import ImageReader
-        img = ImageReader(img_buf)
-        c.drawImage(img, 122, height - 560, width=350, height=350, mask='auto')
+            if img_height > 400:
+                img_height = 400
 
-    y_table = height - 580
-    c.setFont(FONT_NAME, 14);
+            y = check_page_break(c, y, width, height, month_name, year, required_space=img_height + 20)
+            y -= img_height
+            c.drawImage(img, (width - img_width) / 2, y, width=img_width, height=img_height, mask='auto')
+            y -= 30
+
+    y = check_page_break(c, y, width, height, month_name, year, required_space=100)
+
+    c.setFont(FONT_NAME, 14)
     c.setFillColor(colors.HexColor("#2C3E50"))
-    c.drawString(50, y_table, "🏆 ТОП-10 Витрат");
-    y_table -= 30
-    c.setFillColor(colors.HexColor("#BDC3C7"));
-    c.rect(50, y_table - 5, 495, 20, stroke=0, fill=1)
-    c.setFillColor(colors.black);
-    c.setFont(FONT_NAME, 9)
-    c.drawString(60, y_table, "ДАТА");
-    c.drawString(110, y_table, "КАТЕГОРІЯ");
-    c.drawString(230, y_table, "ОПИС");
-    c.drawString(430, y_table, "СУМА");
-    c.drawString(500, y_table, "ХТО");
-    y_table -= 20
+    c.drawString(40, y, "📋 Деталізація витрат (ТОП-3 транзакції)")
+    y -= 25
 
-    for i, item in enumerate(data['top_10']):
-        if item['type'] not in ["Витрати", "Витрата"]: continue
-        if i % 2 == 0: c.setFillColor(colors.HexColor("#F9F9F9")); c.rect(50, y_table - 5, 495, 15, stroke=0, fill=1)
+    total_expense = data['expense'] if data['expense'] > 0 else 1
+
+    styles = getSampleStyleSheet()
+    desc_style = ParagraphStyle(
+        'DescStyle',
+        parent=styles['Normal'],
+        fontName=FONT_NAME,
+        fontSize=9,
+        textColor=colors.black,
+        leading=12
+    )
+
+    all_txs_for_later = []
+
+    # 1. Секція ТОП-3 по категоріях
+    for cat_data in data['grouped_categories']:
+        y -= 10  # Відступ перед новою категорією
+        y = check_page_break(c, y, width, height, month_name, year, required_space=80)
+
+        cat_name = clean_text(cat_data['name'])
+        cat_sum = cat_data['total']
+        pct = (cat_sum / total_expense) * 100
+
+        # Малюємо прямокутник категорії
+        c.setFillColor(colors.HexColor("#34495E"))
+        c.rect(40, y, 515, 22, stroke=0, fill=1)
+        c.setFillColor(colors.white)
+        c.setFont(FONT_NAME, 11)
+        # Центруємо текст всередині 22px прямокутника (y + 7)
+        c.drawString(45, y + 7, f" {cat_name}")
+        c.drawRightString(545, y + 7, f"{cat_sum:,.0f} грн ({pct:.1f}%)")
+        y -= 15  # Відступ після прямокутника
+
+        for tx in cat_data['txs']:
+            # Збираємо всі транзакції для фінального списку
+            tx_copy = tx.copy()
+            tx_copy['cat_name'] = cat_name
+            all_txs_for_later.append(tx_copy)
+
+        for tx in cat_data['top_txs']:
+            date = tx['date'][:-5]
+            desc_text = clean_text(tx['desc'])
+            if not desc_text: desc_text = "Без опису"
+
+            amt = f"{tx['amount']:,.0f} грн"
+            who_raw = clean_text(tx['who'])
+            who = who_raw[:10] if who_raw else "?"
+            amount_text = f"{who} | {amt}"
+
+            p = Paragraph(desc_text, desc_style)
+            w, h = p.wrapOn(c, 360, 0)
+
+            y = check_page_break(c, y, width, height, month_name, year, required_space=h + 25)
+
+            c.setFillColor(colors.HexColor("#7F8C8D"))
+            c.setFont(FONT_NAME, 9)
+            c.drawString(45, y - 10, date)
+
+            c.setFillColor(colors.black)
+            c.drawRightString(545, y - 10, amount_text)
+
+            p.drawOn(c, 85, y - h)
+            y -= (h + 15)  # Більший відступ після кожної транзакції
+
+    # 2. Секція "Всі транзакції хронологічно"
+    y = check_page_break(c, y, width, height, month_name, year, required_space=120)
+    y -= 30
+    c.setFont(FONT_NAME, 14)
+    c.setFillColor(colors.HexColor("#2C3E50"))
+    c.drawString(40, y, "📝 Всі транзакції за місяць (Хронологія)")
+    y -= 25
+
+    # Сортуємо транзакції за днем (перші 2 символи дати)
+    all_txs_sorted = sorted(all_txs_for_later, key=lambda x: int(x['date'][:2]))
+
+    for tx in all_txs_sorted:
+        date = tx['date'][:-5]
+        desc_text = clean_text(tx['desc'])
+        if not desc_text: desc_text = "Без опису"
+        cat_tag = f"[{tx['cat_name'][:15]}] "
+
+        amt = f"{tx['amount']:,.0f} грн"
+        who_raw = clean_text(tx['who'])
+        who = who_raw[:10] if who_raw else "?"
+        amount_text = f"{who} | {amt}"
+
+        # Об'єднуємо категорію та опис
+        p = Paragraph(f"<b>{cat_tag}</b>{desc_text}", desc_style)
+        w, h = p.wrapOn(c, 360, 0)
+
+        y = check_page_break(c, y, width, height, month_name, year, required_space=h + 20)
+
+        c.setFillColor(colors.HexColor("#7F8C8D"))
+        c.setFont(FONT_NAME, 9)
+        c.drawString(45, y - 10, date)
+
         c.setFillColor(colors.black)
-        date = item['date'][:-5];
-        cat = clean_text(item['cat'])[:20]
-        desc = clean_text(item['desc']);
-        desc = desc[:35] + "..." if len(desc) > 35 else desc
-        amt = f"-{item['amount']:,.0f}";
-        who = clean_text(item['who'])[:10]
-        c.drawString(60, y_table, date);
-        c.drawString(110, y_table, cat);
-        c.drawString(230, y_table, desc);
-        c.drawString(430, y_table, amt);
-        c.drawString(500, y_table, who)
-        y_table -= 15;
-        if y_table < 50: break
+        c.drawRightString(545, y - 10, amount_text)
 
-    c.save();
+        p.drawOn(c, 85, y - h)
+        y -= (h + 10)
+
+    c.save()
     buffer.seek(0)
     return buffer

@@ -1,11 +1,12 @@
 import matplotlib
-matplotlib.use('Agg') # <--- ВАЖЛИВО: Вимикає GUI, щоб не було помилок у потоках
+
+matplotlib.use('Agg')  # <--- ВАЖЛИВО: Вимикає GUI, щоб не було помилок у потоках
 import matplotlib.pyplot as plt
 import io
 import re
 
+
 def generate_pie_chart(data_dict, title="Витрати"):
-    """Малює діаграму з легендою збоку."""
     if not data_dict: return None
 
     clean_data = {}
@@ -15,51 +16,38 @@ def generate_pie_chart(data_dict, title="Витрати"):
         clean_data[clean_name] = clean_data.get(clean_name, 0) + val
 
     total = sum(clean_data.values())
-    labels = []
-    sizes = []
-    sorted_data = sorted(clean_data.items(), key=lambda x: x[1], reverse=True)
+    if total == 0: return None
 
-    other_sum = 0
-    limit_items = 9
+    sorted_data = sorted(clean_data.items(), key=lambda x: x[1])
 
-    for i, (cat, amount) in enumerate(sorted_data):
-        if i < limit_items:
-            labels.append(cat)
-            sizes.append(amount)
-        else:
-            other_sum += amount
+    labels = [item[0] for item in sorted_data]
+    sizes = [item[1] for item in sorted_data]
 
-    if other_sum > 0:
-        labels.append("Інше")
-        sizes.append(other_sum)
+    fig_height = max(6, len(labels) * 0.4)
+    fig, ax = plt.subplots(figsize=(10, fig_height))
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    cmap = plt.get_cmap("tab20")
-    colors = cmap(range(len(sizes)))
+    # Додаємо жорсткий відступ зліва для довгих назв категорій
+    plt.subplots_adjust(left=0.25, right=0.95)
 
-    wedges, texts, autotexts = ax.pie(
-        sizes, labels=None, autopct='%1.1f%%', startangle=140,
-        colors=colors, pctdistance=0.85, wedgeprops=dict(width=0.5)
-    )
+    bars = ax.barh(labels, sizes, color='#3498DB', edgecolor='none')
 
-    for autotext in autotexts:
-        autotext.set_color('black')
-        autotext.set_fontsize(9)
-        try:
-            if float(autotext.get_text().strip('%')) < 2: autotext.set_text('')
-        except: pass
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.xaxis.set_visible(False)
 
-    legend_labels = []
-    for cat, amount in zip(labels, sizes):
-        percent = (amount / total) * 100
-        legend_labels.append(f"{cat} — {amount:,.0f} грн ({percent:.1f}%)")
+    for bar in bars:
+        width = bar.get_width()
+        percentage = (width / total) * 100
+        label_text = f" {width:,.0f} грн ({percentage:.1f}%)"
+        ax.text(width, bar.get_y() + bar.get_height() / 2, label_text,
+                va='center', ha='left', fontsize=10, color='#2C3E50', fontweight='bold')
 
-    ax.legend(wedges, legend_labels, title="Категорії", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1))
-    plt.title(title, fontsize=14, fontweight='bold')
-    plt.tight_layout()
+    plt.title(title, fontsize=14, fontweight='bold', color='#2C3E50', pad=20)
 
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight')
+    plt.savefig(buf, format='png', bbox_inches='tight', transparent=True)
     buf.seek(0)
     plt.close()
+
     return buf

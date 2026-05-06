@@ -463,12 +463,14 @@ async def report_month(message: types.Message, state: FSMContext):
     await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_DOCUMENT)
 
     data = await run_sync(gs.get_month_history, month, year)
-    if not data or not data['transactions']:
+
+    # ФІКС: Тепер ми перевіряємо лише чи повернулися дані, без старого ключа
+    if not data:
         return await message.answer("❌ Немає даних")
 
     try:
         pdf = await run_sync(reports.generate_monthly_report, data, message.text, year)
-        # Динамічна назва файлу: Report_Лютий_2026.pdf
+        # Динамічна назва файлу
         filename = f"Report_{message.text}_{year}.pdf"
         await message.answer_document(BufferedInputFile(pdf.read(), filename=filename),
                                       caption=f"📊 Звіт за <b>{message.text} {year}</b> готовий!", parse_mode="HTML")
