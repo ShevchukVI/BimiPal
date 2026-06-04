@@ -84,6 +84,15 @@ class GoogleSheetManager:
         except:
             return None
 
+    def update_last_transaction_amount(self, new_amount):
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            sheet.update_cell(3, 3, new_amount)
+            return True
+        except Exception as e:
+            print(f"🔴 Error updating amount: {e}")
+            return False
+
     # --- HISTORY CONTROL (v3.3) ---
     def get_last_transactions(self, page=1, page_size=5):
         """Повертає історію з пагінацією."""
