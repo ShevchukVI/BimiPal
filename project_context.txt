@@ -1,8 +1,14 @@
+Ось повний код мого проєкту BimiPal. Враховуй структуру та логіку при наданні порад.
+
+
+====================
+FILE: main.py
+====================
+
 import asyncio
 import logging
 import sys
 import html
-import subprocess
 from datetime import datetime
 from functools import partial
 
@@ -155,19 +161,6 @@ async def cmd_restart(message: types.Message):
     if message.from_user.id not in USERS: return
     await message.answer("🔄 Перезапуск...")
     sys.exit(0)
-
-@dp.message(Command("update"))
-async def cmd_update(message: types.Message):
-    if message.from_user.id not in USERS: return
-    await message.answer("🔄 Завантажую оновлення з GitHub...")
-    try:
-        process = subprocess.Popen(["git", "pull", "origin", "main"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        out, err = process.communicate()
-        await message.answer(f"✅ Результат оновлення:\n<pre>{html.escape(out)}</pre>\nЗастосовую зміни та перезапускаюсь...", parse_mode="HTML")
-    except Exception as e:
-        await message.answer(f"❌ Помилка оновлення: {e}")
-    finally:
-        sys.exit(0)
 
 
 # ================= ЗАГАЛЬНА ЛОГІКА ВВОДУ ЧИСЕЛ =================
@@ -692,3 +685,714 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+====================
+FILE: gs_manager.py
+====================
+
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime, timedelta
+import calendar
+import re
+from config import SPREADSHEET_ID, SHEET_NAME
+
+
+class GoogleSheetManager:
+    def __init__(self):
+        self.scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        self.creds_file = "service_account.json"
+        self.authenticate()
+
+    def authenticate(self):
+        self.creds = ServiceAccountCredentials.from_json_keyfile_name(self.creds_file, self.scope)
+        self.client = gspread.authorize(self.creds)
+
+    def _clean_amount(self, amount_str):
+        if isinstance(amount_str, (int, float)): return float(amount_str)
+        s = str(amount_str).replace('\xa0', '').replace(' ', '')
+        s = re.sub(r'[^\d,.-]', '', s)
+        if '.' in s and ',' in s: s = s.replace('.', '')
+        s = s.replace(',', '.')
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+
+    # --- CATEGORIES ---
+    def get_categories(self):
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet("Налаштування")
+            exp_raw = sheet.col_values(1)
+            inc_raw = sheet.col_values(2)
+            expense_cats = [x for x in exp_raw[1:] if x.strip()]
+            income_cats = [x for x in inc_raw[1:] if x.strip()]
+            if not expense_cats: expense_cats = ["Інше"]
+            if not income_cats: income_cats = ["Дохід"]
+            return expense_cats, income_cats
+        except Exception as e:
+            print(f"🔴 Error reading categories: {e}")
+            return (["🛒 Продукти"], ["💰 Дохід"])
+
+    # --- TRANSACTIONS ---
+    def add_transaction(self, date, category, amount, t_type, item_name, note, who):
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            row = [date, category, amount, t_type, item_name, note, who]
+            sheet.insert_row(row, 3)
+            return True
+        except Exception as e:
+            print(f"🔴 Error adding: {e}")
+            try:
+                self.authenticate()
+                sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+                sheet.insert_row(row, 3)
+                return True
+            except:
+                return False
+
+    def add_transfer(self, amount, note, from_who, to_who):
+        """Створює транзакцію переказу між балансами."""
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            date_now = datetime.now().strftime("%d.%m.%Y")
+            row_out = [date_now, "🔄 Переказ", amount, "Витрати", f"Переказ -> {to_who}", note, from_who]
+            row_in = [date_now, "🔄 Переказ", amount, "Поповнення", f"Отримано <- {from_who}", note, to_who]
+
+            sheet.insert_row(row_in, 3)
+            sheet.insert_row(row_out, 3)
+            return True
+        except Exception as e:
+            print(f"🔴 Error transfer: {e}")
+            return False
+
+    def undo_last_transaction(self):
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            row_values = sheet.row_values(3)
+            if not row_values or row_values[0] == "Дата": return None
+            sheet.delete_rows(3)
+            return {"date": row_values[0], "category": row_values[1], "amount": row_values[2]}
+        except:
+            return None
+
+    def update_last_transaction_amount(self, new_amount):
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            sheet.update_cell(3, 3, new_amount)
+            return True
+        except Exception as e:
+            print(f"🔴 Error updating amount: {e}")
+            return False
+
+    # --- HISTORY CONTROL (v3.3) ---
+    def get_last_transactions(self, page=1, page_size=5):
+        """Повертає історію з пагінацією."""
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            start_row = 3 + (page - 1) * page_size
+            end_row = start_row + page_size - 1
+
+            rows = sheet.get_values(f"A{start_row}:G{end_row}")
+
+            history = []
+            for i, row in enumerate(rows):
+                row_idx = start_row + i
+                if not row or len(row) < 3: continue
+
+                history.append({
+                    "id": row_idx,
+                    "date": row[0],
+                    "category": row[1],
+                    "amount": self._clean_amount(row[2]),
+                    "desc": row[4] if len(row) > 4 else "",
+                    "who": row[6] if len(row) > 6 else ""
+                })
+            return history
+        except Exception as e:
+            print(f"🔴 Error history: {e}")
+            return []
+
+    def delete_transaction_by_row(self, row_idx):
+        """Видаляє конкретний рядок з таблиці."""
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            sheet.delete_rows(int(row_idx))
+            return True
+        except Exception as e:
+            print(f"🔴 Error delete: {e}")
+            return False
+
+    # --- STATS ---
+    def get_month_stats(self):
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            all_values = sheet.get_all_values()
+            if len(all_values) > 2:
+                data_rows = all_values[2:]
+            else:
+                return None
+
+            now = datetime.now()
+            month_income = 0.0
+            month_expense = 0.0
+            total_wallet = 0.0
+            wallet_vadym = 0.0
+            wallet_anya = 0.0
+            month_categories = {}
+
+            for row in data_rows:
+                if not row or len(row) < 4 or not row[0]: continue
+                try:
+                    amount = self._clean_amount(row[2])
+                    t_type = row[3].strip()
+                    cat = row[1].strip()
+                    who = row[6].strip() if len(row) > 6 else ""
+                    t_date = datetime.strptime(row[0].strip(), "%d.%m.%Y")
+
+                    # 🛡 БРОНЯ: перевіряємо і тип, і саму назву категорії
+                    is_income = t_type in ["Поповнення", "Дохід", "Доходи"] or "Доход" in cat or "Поповнення" in cat
+
+                    if is_income:
+                        total_wallet += amount
+                        if "Вадим" in who:
+                            wallet_vadym += amount
+                        elif "Аня" in who:
+                            wallet_anya += amount
+                    else:
+                        total_wallet -= amount
+                        if "Вадим" in who:
+                            wallet_vadym -= amount
+                        elif "Аня" in who:
+                            wallet_anya -= amount
+
+                    if t_date.month == now.month and t_date.year == now.year:
+                        if is_income:
+                            month_income += amount
+                        else:
+                            month_expense += amount
+                            month_categories[cat] = month_categories.get(cat, 0) + amount
+                except Exception:
+                    # БРОНЯ: Якщо рядок "зламаний", просто пропускаємо його і йдемо далі
+                    continue
+
+            top_cats = sorted(month_categories.items(), key=lambda x: x[1], reverse=True)[:3]
+            MONTHS_UA = {1: "Січень", 2: "Лютий", 3: "Березень", 4: "Квітень", 5: "Травень", 6: "Червень", 7: "Липень",
+                         8: "Серпень", 9: "Вересень", 10: "Жовтень", 11: "Листопад", 12: "Грудень"}
+            usd_balance = self.get_currency_balance()
+
+            return {
+                "income": month_income,
+                "expense": month_expense,
+                "balance": month_income - month_expense,
+                "total_wallet": total_wallet,
+                "wallet_vadym": wallet_vadym,
+                "wallet_anya": wallet_anya,
+                "usd_wallet": usd_balance,
+                "top_cats": top_cats,
+                "month_name": MONTHS_UA.get(now.month, "Цей місяць"),
+                "categories_dict": month_categories
+            }
+        except Exception as e:
+            print(f"🔴 Error stats: {e}")
+            return None
+
+    def get_week_stats(self):
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            all_values = sheet.get_all_values()
+            if len(all_values) <= 2: return None
+            data_rows = all_values[2:]
+            now = datetime.now()
+            income = 0.0
+            expense = 0.0
+            categories = {}
+            for row in data_rows:
+                if not row or len(row) < 4 or not row[0]: continue
+                try:
+                    t_date = datetime.strptime(row[0].strip(), "%d.%m.%Y")
+                    if 0 <= (now - t_date).days <= 7:
+                        amount = self._clean_amount(row[2])
+                        t_type = row[3].strip()
+                        cat = row[1].strip()
+
+                        is_income = t_type in ["Поповнення", "Дохід", "Доходи"] or "Доход" in cat or "Поповнення" in cat
+
+                        if is_income:
+                            income += amount
+                        else:
+                            expense += amount
+                            categories[cat] = categories.get(cat, 0) + amount
+                except Exception:
+                    continue
+            return {"income": income, "expense": expense,
+                    "top_cats": sorted(categories.items(), key=lambda x: x[1], reverse=True)[:5]}
+        except:
+            return None
+
+    # --- REPORTS (PDF) ---
+    def get_month_history(self, month, year):
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            all_values = sheet.get_all_values()
+            if len(all_values) <= 2: return None
+            data_rows = all_values[2:]
+
+            income = 0.0
+            expense = 0.0
+            categories_dict = {}
+
+            for row in data_rows:
+                if not row or len(row) < 4: continue
+                try:
+                    t_date = datetime.strptime(row[0].strip(), "%d.%m.%Y")
+                    if t_date.month == month and t_date.year == year:
+                        amount = self._clean_amount(row[2])
+                        t_type = row[3].strip()
+                        cat = row[1].strip()
+                        desc = row[4].strip() if len(row) > 4 else ""
+                        who = row[6].strip() if len(row) > 6 else ""
+
+                        is_income = t_type in ["Поповнення", "Дохід", "Доходи"] or "Доход" in cat or "Поповнення" in cat
+
+                        if is_income:
+                            income += amount
+                        else:
+                            expense += amount
+                            if cat not in categories_dict:
+                                categories_dict[cat] = {'total': 0.0, 'txs': []}
+
+                            categories_dict[cat]['total'] += amount
+                            categories_dict[cat]['txs'].append({
+                                "date": row[0], "amount": amount, "desc": desc, "who": who
+                            })
+                except Exception:
+                    # БРОНЯ: ігнор рядків, які неможливо обробити
+                    continue
+
+            if expense == 0 and income == 0:
+                return None
+
+            # Групування та сортування категорій і ТОП-3 транзакцій
+            sorted_cats = sorted(
+                [{"name": k, "total": v['total'], "txs": v['txs']} for k, v in categories_dict.items()],
+                key=lambda x: x['total'],
+                reverse=True
+            )
+
+            for cat in sorted_cats:
+                cat['top_txs'] = sorted(cat['txs'], key=lambda x: x['amount'], reverse=True)[:3]
+
+            return {
+                "income": income,
+                "expense": expense,
+                "balance": income - expense,
+                "grouped_categories": sorted_cats
+            }
+        except Exception as e:
+            print(f"🔴 Error history: {e}")
+            return None
+
+    # --- CURRENCY ---
+    def add_currency_transaction(self, date, operation, amount_usd, rate, amount_uah, note):
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet("Валюта")
+            row = [date, operation, amount_usd, rate, amount_uah, note]
+            sheet.append_row(row)
+            return True
+        except Exception as e:
+            print(f"🔴 Error currency add: {e}")
+            return False
+
+    def get_currency_balance(self):
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet("Валюта")
+            col_usd = sheet.col_values(3)
+            total = 0.0
+            for val in col_usd[1:]:
+                total += self._clean_amount(val)
+            return total
+        except:
+            return 0.0
+
+    # --- LIMITS ---
+    def get_budget_limits(self):
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet("Планування")
+            data = sheet.get_all_values()
+            limits = {}
+            for row in data[1:]:
+                if len(row) >= 2 and row[0] and self._clean_amount(row[1]) > 0:
+                    limits[row[0].strip()] = self._clean_amount(row[1])
+            return limits
+        except:
+            return {}
+
+    def update_budget_limit(self, category, new_amount):
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet("Планування")
+            try:
+                cell = sheet.find(category)
+                sheet.update_cell(cell.row, cell.col + 1, new_amount)
+            except:
+                sheet.append_row([category, new_amount])
+            return True
+        except:
+            return False
+
+    # --- REMINDERS (SMART) ---
+    def get_due_reminders(self):
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet("Нагадування")
+            all_values = sheet.get_all_values()
+            if len(all_values) < 2: return []
+            data_rows = all_values[1:]
+            due_items = []
+            now = datetime.now()
+            for i, row in enumerate(data_rows):
+                if len(row) < 4: continue
+                name = row[0]
+                try:
+                    day_to_pay = int(row[1])
+                except:
+                    continue
+                try:
+                    amount = self._clean_amount(row[2])
+                except:
+                    amount = 0.0
+                category = row[3]
+                last_paid_str = row[4] if len(row) > 4 else ""
+
+                last_paid_date = None
+                if last_paid_str:
+                    try:
+                        last_paid_date = datetime.strptime(last_paid_str, "%d.%m.%Y")
+                    except:
+                        pass
+
+                try:
+                    this_month_due_date = datetime(now.year, now.month, day_to_pay)
+                except ValueError:
+                    last_day = calendar.monthrange(now.year, now.month)[1]
+                    this_month_due_date = datetime(now.year, now.month, last_day)
+
+                is_paid = False
+                if last_paid_date:
+                    if last_paid_date.month == now.month and last_paid_date.year == now.year:
+                        is_paid = True
+                    else:
+                        early_window = this_month_due_date - timedelta(days=5)
+                        if last_paid_date >= early_window: is_paid = True
+                if is_paid: continue
+
+                if now.day >= day_to_pay:
+                    due_items.append({"row_idx": i + 2, "name": name, "amount": amount, "category": category})
+            return due_items
+        except Exception as e:
+            print(f"🔴 Error reminders: {e}")
+            return []
+
+    def update_reminder_payment(self, row_idx, date_str):
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet("Нагадування")
+            sheet.update_cell(row_idx, 5, date_str)
+            return True
+        except:
+            return False
+
+====================
+FILE: reports.py
+====================
+
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib import colors
+from reportlab.platypus import Paragraph
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+import matplotlib
+
+matplotlib.use('Agg')
+import io
+import os
+import re
+import visuals
+
+# Змінили на Montserrat!
+FONT_FILE = 'Montserrat-Regular.ttf'
+FONT_NAME = 'Montserrat'
+
+try:
+    if os.path.exists(FONT_FILE):
+        pdfmetrics.registerFont(TTFont(FONT_NAME, FONT_FILE))
+    else:
+        FONT_NAME = 'Helvetica'
+except:
+    FONT_NAME = 'Helvetica'
+
+
+def clean_text(text):
+    if not text: return ""
+    return re.sub(r'[^\w\s,.-]', '', str(text)).strip()
+
+
+def draw_header(c, width, height, month_name, year):
+    c.setFillColor(colors.HexColor("#2C3E50"))
+    c.rect(0, height - 100, width, 100, stroke=0, fill=1)
+    c.setFillColor(colors.white)
+    c.setFont(FONT_NAME, 26)
+    c.drawString(40, height - 50, f"Фінансовий звіт: {month_name} {year}")
+    c.setFont(FONT_NAME, 10)
+    c.drawRightString(width - 40, height - 50, "BimiPal Finance Bot")
+
+
+def check_page_break(c, current_y, width, height, month_name, year, required_space=50):
+    if current_y < required_space:
+        c.showPage()
+        draw_header(c, width, height, month_name, year)
+        return height - 130
+    return current_y
+
+
+def generate_monthly_report(data, month_name, year):
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+
+    draw_header(c, width, height, month_name, year)
+
+    y = height - 140
+    card_width = 155
+    card_height = 50
+    gap = 20
+
+    def draw_card(x, title, value, color_hex):
+        c.setFillColor(colors.HexColor("#ECF0F1"))
+        c.roundRect(x, y, card_width, card_height, 4, stroke=0, fill=1)
+        c.setFillColor(colors.HexColor("#7F8C8D"))
+        c.setFont(FONT_NAME, 9)
+        c.drawString(x + 10, y + 30, title)
+        c.setFillColor(colors.HexColor(color_hex))
+        c.setFont(FONT_NAME, 14)
+        c.drawString(x + 10, y + 10, value)
+
+    draw_card(40, "ЗАГАЛЬНИЙ ДОХІД", f"{data['income']:,.0f} грн", "#27AE60")
+    draw_card(40 + card_width + gap, "ЗАГАЛЬНІ ВИТРАТИ", f"{data['expense']:,.0f} грн", "#C0392B")
+    bal_color = "#2980B9" if data['balance'] >= 0 else "#C0392B"
+    draw_card(40 + (card_width + gap) * 2, "ЗАЛИШОК (Net)", f"{data['balance']:,.0f} грн", bal_color)
+
+    y -= 40
+
+    # Генеруємо та малюємо гістограму
+    chart_data = {cat['name']: cat['total'] for cat in data['grouped_categories']}
+    if chart_data:
+        chart_buf = visuals.generate_pie_chart(chart_data, title="")
+        if chart_buf:
+            from reportlab.lib.utils import ImageReader
+            img = ImageReader(chart_buf)
+            img_width = 450
+            fig_height = max(6, len(chart_data) * 0.4)
+            img_height = (img_width / 10) * fig_height
+
+            if img_height > 400:
+                img_height = 400
+
+            y = check_page_break(c, y, width, height, month_name, year, required_space=img_height + 20)
+            y -= img_height
+            c.drawImage(img, (width - img_width) / 2, y, width=img_width, height=img_height, mask='auto')
+            y -= 30
+
+    y = check_page_break(c, y, width, height, month_name, year, required_space=100)
+
+    c.setFont(FONT_NAME, 14)
+    c.setFillColor(colors.HexColor("#2C3E50"))
+    c.drawString(40, y, "📋 Деталізація витрат (ТОП-3 транзакції)")
+    y -= 25
+
+    total_expense = data['expense'] if data['expense'] > 0 else 1
+
+    styles = getSampleStyleSheet()
+    desc_style = ParagraphStyle(
+        'DescStyle',
+        parent=styles['Normal'],
+        fontName=FONT_NAME,
+        fontSize=9,
+        textColor=colors.black,
+        leading=12
+    )
+
+    all_txs_for_later = []
+
+    # 1. Секція ТОП-3 по категоріях
+    for cat_data in data['grouped_categories']:
+        y -= 10  # Відступ перед новою категорією
+        y = check_page_break(c, y, width, height, month_name, year, required_space=80)
+
+        cat_name = clean_text(cat_data['name'])
+        cat_sum = cat_data['total']
+        pct = (cat_sum / total_expense) * 100
+
+        # Малюємо прямокутник категорії
+        c.setFillColor(colors.HexColor("#34495E"))
+        c.rect(40, y, 515, 22, stroke=0, fill=1)
+        c.setFillColor(colors.white)
+        c.setFont(FONT_NAME, 11)
+        # Центруємо текст всередині 22px прямокутника (y + 7)
+        c.drawString(45, y + 7, f" {cat_name}")
+        c.drawRightString(545, y + 7, f"{cat_sum:,.0f} грн ({pct:.1f}%)")
+        y -= 15  # Відступ після прямокутника
+
+        for tx in cat_data['txs']:
+            # Збираємо всі транзакції для фінального списку
+            tx_copy = tx.copy()
+            tx_copy['cat_name'] = cat_name
+            all_txs_for_later.append(tx_copy)
+
+        for tx in cat_data['top_txs']:
+            date = tx['date'][:-5]
+            desc_text = clean_text(tx['desc'])
+            if not desc_text: desc_text = "Без опису"
+
+            amt = f"{tx['amount']:,.0f} грн"
+            who_raw = clean_text(tx['who'])
+            who = who_raw[:10] if who_raw else "?"
+            amount_text = f"{who} | {amt}"
+
+            p = Paragraph(desc_text, desc_style)
+            w, h = p.wrapOn(c, 360, 0)
+
+            y = check_page_break(c, y, width, height, month_name, year, required_space=h + 25)
+
+            c.setFillColor(colors.HexColor("#7F8C8D"))
+            c.setFont(FONT_NAME, 9)
+            c.drawString(45, y - 10, date)
+
+            c.setFillColor(colors.black)
+            c.drawRightString(545, y - 10, amount_text)
+
+            p.drawOn(c, 85, y - h)
+            y -= (h + 15)  # Більший відступ після кожної транзакції
+
+    # 2. Секція "Всі транзакції хронологічно"
+    y = check_page_break(c, y, width, height, month_name, year, required_space=120)
+    y -= 30
+    c.setFont(FONT_NAME, 14)
+    c.setFillColor(colors.HexColor("#2C3E50"))
+    c.drawString(40, y, "📝 Всі транзакції за місяць (Хронологія)")
+    y -= 25
+
+    # Сортуємо транзакції за днем (перші 2 символи дати)
+    all_txs_sorted = sorted(all_txs_for_later, key=lambda x: int(x['date'][:2]))
+
+    for tx in all_txs_sorted:
+        date = tx['date'][:-5]
+        desc_text = clean_text(tx['desc'])
+        if not desc_text: desc_text = "Без опису"
+        cat_tag = f"[{tx['cat_name'][:15]}] "
+
+        amt = f"{tx['amount']:,.0f} грн"
+        who_raw = clean_text(tx['who'])
+        who = who_raw[:10] if who_raw else "?"
+        amount_text = f"{who} | {amt}"
+
+        # Об'єднуємо категорію та опис
+        p = Paragraph(f"<b>{cat_tag}</b>{desc_text}", desc_style)
+        w, h = p.wrapOn(c, 360, 0)
+
+        y = check_page_break(c, y, width, height, month_name, year, required_space=h + 20)
+
+        c.setFillColor(colors.HexColor("#7F8C8D"))
+        c.setFont(FONT_NAME, 9)
+        c.drawString(45, y - 10, date)
+
+        c.setFillColor(colors.black)
+        c.drawRightString(545, y - 10, amount_text)
+
+        p.drawOn(c, 85, y - h)
+        y -= (h + 10)
+
+    c.save()
+    buffer.seek(0)
+    return buffer
+
+====================
+FILE: visuals.py
+====================
+
+import matplotlib
+
+matplotlib.use('Agg')  # <--- ВАЖЛИВО: Вимикає GUI, щоб не було помилок у потоках
+import matplotlib.pyplot as plt
+import io
+import re
+
+
+def generate_pie_chart(data_dict, title="Витрати"):
+    if not data_dict: return None
+
+    clean_data = {}
+    for cat, val in data_dict.items():
+        clean_name = re.sub(r'[^\w\s]', '', cat).strip()
+        if not clean_name: clean_name = cat
+        clean_data[clean_name] = clean_data.get(clean_name, 0) + val
+
+    total = sum(clean_data.values())
+    if total == 0: return None
+
+    sorted_data = sorted(clean_data.items(), key=lambda x: x[1])
+
+    labels = [item[0] for item in sorted_data]
+    sizes = [item[1] for item in sorted_data]
+
+    fig_height = max(6, len(labels) * 0.4)
+    fig, ax = plt.subplots(figsize=(10, fig_height))
+
+    # Додаємо жорсткий відступ зліва для довгих назв категорій
+    plt.subplots_adjust(left=0.25, right=0.95)
+
+    bars = ax.barh(labels, sizes, color='#3498DB', edgecolor='none')
+
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.xaxis.set_visible(False)
+
+    for bar in bars:
+        width = bar.get_width()
+        percentage = (width / total) * 100
+        label_text = f" {width:,.0f} грн ({percentage:.1f}%)"
+        ax.text(width, bar.get_y() + bar.get_height() / 2, label_text,
+                va='center', ha='left', fontsize=10, color='#2C3E50', fontweight='bold')
+
+    plt.title(title, fontsize=14, fontweight='bold', color='#2C3E50', pad=20)
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', transparent=True)
+    buf.seek(0)
+    plt.close()
+
+    return buf
+
+====================
+FILE: config.py
+====================
+
+# config.py
+import os
+
+# Твій токен
+BOT_TOKEN = "8568515510:AAE94zvnVLuJKtRSSIFx0hR-buRmK-O35lM" # 8256521521:AAF1_Iq9fZazzmk0y01oj1TH0An5YeEKsKE
+
+# ID користувачів
+USERS = {
+    527405868: "Вадим",
+    568836417: "Аня"
+}
+
+# ‼️ ВСТАВ СЮДИ ID ТАБЛИЦІ (це набір букв після /d/ у посиланні)
+SPREADSHEET_ID = "1ZsG8zfxsInKk4YnxeXWvdoqcYWiXCkfn4RIe-QINvio"
+
+# Назва аркуша (твоя назва)
+SHEET_NAME = "Тест" # Транзакції
+

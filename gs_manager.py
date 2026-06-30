@@ -323,6 +323,111 @@ class GoogleSheetManager:
         except:
             return 0.0
 
+    # --- SPRINTS (v4.0 Summer Plan) ---
+    def get_sprint_data(self):
+        try:
+            sprint_sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet("Спринти")
+            sprints_data = sprint_sheet.get_all_values()[1:]  # Пропускаємо заголовки
+
+            now = datetime.now()
+            active_sprint = None
+            sprint_categories = {}
+            total_budget = 0.0
+
+            # 1. Знаходимо активний спринт та збираємо його категорії
+            for row in sprints_data:
+                if len(row) < 5: continue
+                try:
+                    start_date = datetime.strptime(row[1].strip(), "%d.%m.%Y")
+                    end_date = datetime.strptime(row[2].strip(), "%d.%m.%Y").replace(hour=23, minute=59, second=59)
+
+                    if start_date <= now <= end_date:
+                        if not active_sprint:
+                            active_sprint = {
+                                "name": row[0],
+                                "start": start_date,
+                                "end": end_date
+                            }
+
+                        cat_name = row[3].strip()
+                        limit = self._clean_amount(row[4])
+                        sprint_categories[cat_name] = limit
+                        total_budget += limit
+                except Exception:
+                    continue
+
+            if not active_sprint:
+                return None
+
+            # 2. Рахуємо витрати в межах дат спринту
+            tx_sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            tx_data = tx_sheet.get_all_values()[2:]
+
+            sprint_spent_total = 0.0
+            spent_by_cat = {cat: 0.0 for cat in sprint_categories.keys()}
+            spent_today = 0.0
+
+            for row in tx_data:
+                if len(row) < 4 or not row[0]: continue
+                try:
+                    t_date = datetime.strptime(row[0].strip(), "%d.%m.%Y")
+
+                    if active_sprint["start"].date() <= t_date.date() <= active_sprint["end"].date():
+                        t_type = row[3].strip()
+                        cat = row[1].strip()
+                        amount = self._clean_amount(row[2])
+
+                        is_income = t_type in ["Поповнення", "Дохід", "Доходи"] or "Доход" in cat or "Поповнення" in cat
+
+                        # Ігноруємо доходи, купівлю валюти та перекази
+                        if not is_income and cat not in ["💵 Купівля валюти", "🔄 Переказ"]:
+                            sprint_spent_total += amount
+
+                            if cat in spent_by_cat:
+                                spent_by_cat[cat] += amount
+
+                            # Рахуємо витрати суто за сьогодні
+                            if t_date.date() == now.date():
+                                spent_today += amount
+                except Exception:
+                    continue
+
+            # 3. Математика "Burn Rate" та "Віртуальної скарбнички"
+            days_total = (active_sprint["end"].date() - active_sprint["start"].date()).days + 1
+            days_passed = (now.date() - active_sprint["start"].date()).days + 1  # Включаючи сьогодні
+            days_left = days_total - days_passed
+            if days_left < 1: days_left = 1
+
+            # Початкова планова норма на день (якби ми витрачали ідеально рівно)
+            initial_daily_norm = total_budget / days_total if days_total > 0 else 0
+
+            # Скільки МИ МАЛИ Б витратити на сьогоднішній день за планом
+            expected_spent_to_date = initial_daily_norm * days_passed
+
+            # Віртуальна економія (якщо ми витратили менше, ніж дозволяла норма)
+            virtual_savings = expected_spent_to_date - sprint_spent_total
+
+            # Актуальна норма на день (з урахуванням перелімітів/економії)
+            budget_left = total_budget - sprint_spent_total
+            actual_daily_norm = budget_left / days_left if budget_left > 0 else 0
+
+            return {
+                "name": active_sprint["name"],
+                "total_budget": total_budget,
+                "spent_total": sprint_spent_total,
+                "spent_today": spent_today,
+                "left": budget_left,
+                "actual_daily_norm": actual_daily_norm,
+                "virtual_savings": virtual_savings,
+                "days_left": days_left,
+                "categories": sprint_categories,
+                "spent_by_cat": spent_by_cat
+            }
+
+        except Exception as e:
+            print(f"🔴 Error sprints: {e}")
+            return None
+
     # --- LIMITS ---
     def get_budget_limits(self):
         try:
