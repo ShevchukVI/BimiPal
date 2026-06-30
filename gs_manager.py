@@ -3,18 +3,44 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta
 import calendar
 import re
+import time
 from config import SPREADSHEET_ID, SHEET_NAME
-
 
 class GoogleSheetManager:
     def __init__(self):
         self.scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         self.creds_file = "service_account.json"
+        self._cached_data = None
+        self._cache_time = 0
         self.authenticate()
 
     def authenticate(self):
         self.creds = ServiceAccountCredentials.from_json_keyfile_name(self.creds_file, self.scope)
         self.client = gspread.authorize(self.creds)
+
+    def _clear_cache(self):
+        """Скидає кеш при будь-яких змінах у таблиці."""
+        self._cached_data = None
+        self._cache_time = 0
+
+    def _get_all_rows_cached(self):
+        """Завантажує всю таблицю або віддає її з пам'яті (живе 60 секунд)."""
+        now = time.time()
+        if self._cached_data is not None and (now - self._cache_time < 60):
+            return self._cached_data
+        
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            self._cached_data = sheet.get_all_values()
+            self._cache_time = now
+            return self._cached_data
+        except Exception as e:
+            print(f"🔴 Error getting cached data: {e}")
+            self.authenticate()
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            self._cached_data = sheet.get_all_values()
+            self._cache_time = time.time()
+            return self._cached_data
 
     def _clean_amount(self, amount_str):
         if isinstance(amount_str, (int, float)): return float(amount_str)
@@ -48,6 +74,7 @@ class GoogleSheetManager:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
             row = [date, category, amount, t_type, item_name, note, who]
             sheet.insert_row(row, 3)
+            self._clear_cache()
             return True
         except Exception as e:
             print(f"🔴 Error adding: {e}")
@@ -55,12 +82,12 @@ class GoogleSheetManager:
                 self.authenticate()
                 sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
                 sheet.insert_row(row, 3)
+                self._clear_cache()
                 return True
             except:
                 return False
 
     def add_transfer(self, amount, note, from_who, to_who):
-        """Створює транзакцію переказу між балансами."""
         try:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
             date_now = datetime.now().strftime("%d.%m.%Y")
@@ -69,6 +96,7 @@ class GoogleSheetManager:
 
             sheet.insert_row(row_in, 3)
             sheet.insert_row(row_out, 3)
+            self._clear_cache()
             return True
         except Exception as e:
             print(f"🔴 Error transfer: {e}")
@@ -80,6 +108,7 @@ class GoogleSheetManager:
             row_values = sheet.row_values(3)
             if not row_values or row_values[0] == "Дата": return None
             sheet.delete_rows(3)
+            self._clear_cache()
             return {"date": row_values[0], "category": row_values[1], "amount": row_values[2]}
         except:
             return None
@@ -88,6 +117,7 @@ class GoogleSheetManager:
         try:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
             sheet.update_cell(3, 3, new_amount)
+            self._clear_cache()
             return True
         except Exception as e:
             print(f"🔴 Error updating amount: {e}")
@@ -95,7 +125,6 @@ class GoogleSheetManager:
 
     # --- HISTORY CONTROL (v3.3) ---
     def get_last_transactions(self, page=1, page_size=5):
-        """Повертає історію з пагінацією."""
         try:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
             start_row = 3 + (page - 1) * page_size
@@ -122,10 +151,10 @@ class GoogleSheetManager:
             return []
 
     def delete_transaction_by_row(self, row_idx):
-        """Видаляє конкретний рядок з таблиці."""
         try:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
             sheet.delete_rows(int(row_idx))
+            self._clear_cache()
             return True
         except Exception as e:
             print(f"🔴 Error delete: {e}")
@@ -134,12 +163,10 @@ class GoogleSheetManager:
     # --- STATS ---
     def get_month_stats(self):
         try:
-            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-            all_values = sheet.get_all_values()
-            if len(all_values) > 2:
-                data_rows = all_values[2:]
-            else:
+            all_values = self._get_all_rows_cached()
+            if not all_values or len(all_values) <= 2:
                 return None
+            data_rows = all_values[2:]
 
             now = datetime.now()
             month_income = 0.0
@@ -156,9 +183,11 @@ class GoogleSheetManager:
                     t_type = row[3].strip()
                     cat = row[1].strip()
                     who = row[6].strip() if len(row) > 6 else ""
-                    t_date = datetime.strptime(row[0].strip(), "%d.%m.%Y")
+                    
+                    # Очищаємо дату від пробілів та іншого сміття
+                    clean_date = re.sub(r'[^\d.]', '', row[0].strip())
+                    t_date = datetime.strptime(clean_date, "%d.%m.%Y")
 
-                    # 🛡 БРОНЯ: перевіряємо і тип, і саму назву категорії
                     is_income = t_type in ["Поповнення", "Дохід", "Доходи"] or "Доход" in cat or "Поповнення" in cat
 
                     if is_income:
@@ -181,7 +210,6 @@ class GoogleSheetManager:
                             month_expense += amount
                             month_categories[cat] = month_categories.get(cat, 0) + amount
                 except Exception:
-                    # БРОНЯ: Якщо рядок "зламаний", просто пропускаємо його і йдемо далі
                     continue
 
             top_cats = sorted(month_categories.items(), key=lambda x: x[1], reverse=True)[:3]
@@ -207,18 +235,21 @@ class GoogleSheetManager:
 
     def get_week_stats(self):
         try:
-            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-            all_values = sheet.get_all_values()
-            if len(all_values) <= 2: return None
+            all_values = self._get_all_rows_cached()
+            if not all_values or len(all_values) <= 2: return None
             data_rows = all_values[2:]
+            
             now = datetime.now()
             income = 0.0
             expense = 0.0
             categories = {}
+            
             for row in data_rows:
                 if not row or len(row) < 4 or not row[0]: continue
                 try:
-                    t_date = datetime.strptime(row[0].strip(), "%d.%m.%Y")
+                    clean_date = re.sub(r'[^\d.]', '', row[0].strip())
+                    t_date = datetime.strptime(clean_date, "%d.%m.%Y")
+                    
                     if 0 <= (now - t_date).days <= 7:
                         amount = self._clean_amount(row[2])
                         t_type = row[3].strip()
@@ -241,9 +272,8 @@ class GoogleSheetManager:
     # --- REPORTS (PDF) ---
     def get_month_history(self, month, year):
         try:
-            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-            all_values = sheet.get_all_values()
-            if len(all_values) <= 2: return None
+            all_values = self._get_all_rows_cached()
+            if not all_values or len(all_values) <= 2: return None
             data_rows = all_values[2:]
 
             income = 0.0
@@ -253,7 +283,9 @@ class GoogleSheetManager:
             for row in data_rows:
                 if not row or len(row) < 4: continue
                 try:
-                    t_date = datetime.strptime(row[0].strip(), "%d.%m.%Y")
+                    clean_date = re.sub(r'[^\d.]', '', row[0].strip())
+                    t_date = datetime.strptime(clean_date, "%d.%m.%Y")
+                    
                     if t_date.month == month and t_date.year == year:
                         amount = self._clean_amount(row[2])
                         t_type = row[3].strip()
@@ -275,13 +307,11 @@ class GoogleSheetManager:
                                 "date": row[0], "amount": amount, "desc": desc, "who": who
                             })
                 except Exception:
-                    # БРОНЯ: ігнор рядків, які неможливо обробити
                     continue
 
             if expense == 0 and income == 0:
                 return None
 
-            # Групування та сортування категорій і ТОП-3 транзакцій
             sorted_cats = sorted(
                 [{"name": k, "total": v['total'], "txs": v['txs']} for k, v in categories_dict.items()],
                 key=lambda x: x['total'],
@@ -322,111 +352,6 @@ class GoogleSheetManager:
             return total
         except:
             return 0.0
-
-    # --- SPRINTS (v4.0 Summer Plan) ---
-    def get_sprint_data(self):
-        try:
-            sprint_sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet("Спринти")
-            sprints_data = sprint_sheet.get_all_values()[1:]  # Пропускаємо заголовки
-
-            now = datetime.now()
-            active_sprint = None
-            sprint_categories = {}
-            total_budget = 0.0
-
-            # 1. Знаходимо активний спринт та збираємо його категорії
-            for row in sprints_data:
-                if len(row) < 5: continue
-                try:
-                    start_date = datetime.strptime(row[1].strip(), "%d.%m.%Y")
-                    end_date = datetime.strptime(row[2].strip(), "%d.%m.%Y").replace(hour=23, minute=59, second=59)
-
-                    if start_date <= now <= end_date:
-                        if not active_sprint:
-                            active_sprint = {
-                                "name": row[0],
-                                "start": start_date,
-                                "end": end_date
-                            }
-
-                        cat_name = row[3].strip()
-                        limit = self._clean_amount(row[4])
-                        sprint_categories[cat_name] = limit
-                        total_budget += limit
-                except Exception:
-                    continue
-
-            if not active_sprint:
-                return None
-
-            # 2. Рахуємо витрати в межах дат спринту
-            tx_sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-            tx_data = tx_sheet.get_all_values()[2:]
-
-            sprint_spent_total = 0.0
-            spent_by_cat = {cat: 0.0 for cat in sprint_categories.keys()}
-            spent_today = 0.0
-
-            for row in tx_data:
-                if len(row) < 4 or not row[0]: continue
-                try:
-                    t_date = datetime.strptime(row[0].strip(), "%d.%m.%Y")
-
-                    if active_sprint["start"].date() <= t_date.date() <= active_sprint["end"].date():
-                        t_type = row[3].strip()
-                        cat = row[1].strip()
-                        amount = self._clean_amount(row[2])
-
-                        is_income = t_type in ["Поповнення", "Дохід", "Доходи"] or "Доход" in cat or "Поповнення" in cat
-
-                        # Ігноруємо доходи, купівлю валюти та перекази
-                        if not is_income and cat not in ["💵 Купівля валюти", "🔄 Переказ"]:
-                            sprint_spent_total += amount
-
-                            if cat in spent_by_cat:
-                                spent_by_cat[cat] += amount
-
-                            # Рахуємо витрати суто за сьогодні
-                            if t_date.date() == now.date():
-                                spent_today += amount
-                except Exception:
-                    continue
-
-            # 3. Математика "Burn Rate" та "Віртуальної скарбнички"
-            days_total = (active_sprint["end"].date() - active_sprint["start"].date()).days + 1
-            days_passed = (now.date() - active_sprint["start"].date()).days + 1  # Включаючи сьогодні
-            days_left = days_total - days_passed
-            if days_left < 1: days_left = 1
-
-            # Початкова планова норма на день (якби ми витрачали ідеально рівно)
-            initial_daily_norm = total_budget / days_total if days_total > 0 else 0
-
-            # Скільки МИ МАЛИ Б витратити на сьогоднішній день за планом
-            expected_spent_to_date = initial_daily_norm * days_passed
-
-            # Віртуальна економія (якщо ми витратили менше, ніж дозволяла норма)
-            virtual_savings = expected_spent_to_date - sprint_spent_total
-
-            # Актуальна норма на день (з урахуванням перелімітів/економії)
-            budget_left = total_budget - sprint_spent_total
-            actual_daily_norm = budget_left / days_left if budget_left > 0 else 0
-
-            return {
-                "name": active_sprint["name"],
-                "total_budget": total_budget,
-                "spent_total": sprint_spent_total,
-                "spent_today": spent_today,
-                "left": budget_left,
-                "actual_daily_norm": actual_daily_norm,
-                "virtual_savings": virtual_savings,
-                "days_left": days_left,
-                "categories": sprint_categories,
-                "spent_by_cat": spent_by_cat
-            }
-
-        except Exception as e:
-            print(f"🔴 Error sprints: {e}")
-            return None
 
     # --- LIMITS ---
     def get_budget_limits(self):
@@ -479,7 +404,8 @@ class GoogleSheetManager:
                 last_paid_date = None
                 if last_paid_str:
                     try:
-                        last_paid_date = datetime.strptime(last_paid_str, "%d.%m.%Y")
+                        clean_date = re.sub(r'[^\d.]', '', last_paid_str.strip())
+                        last_paid_date = datetime.strptime(clean_date, "%d.%m.%Y")
                     except:
                         pass
 
