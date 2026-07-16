@@ -438,3 +438,32 @@ class GoogleSheetManager:
             return True
         except:
             return False
+
+    # --- MONOBANK AUTOPILOT ---
+    def update_transaction_category_by_mono_id(self, mono_id, new_category):
+        """Знаходить транзакцію за унікальним ID Монобанку і змінює її категорію."""
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            cell = sheet.find(mono_id)
+            if cell:
+                # Оновлюємо клітинку в колонці B (Категорія)
+                sheet.update_cell(cell.row, 2, new_category)
+                self._clear_cache()
+                return True
+            return False
+        except Exception as e:
+            print(f"🔴 Error mono update: {e}")
+            return False
+
+    def delete_transaction_by_mono_id(self, mono_id):
+        """Видаляє транзакцію, якщо натиснуто кнопку Ігнорувати."""
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            cell = sheet.find(mono_id)
+            if cell:
+                sheet.delete_rows(cell.row)
+                self._clear_cache()
+                return True
+            return False
+        except:
+            return False

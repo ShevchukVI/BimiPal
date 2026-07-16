@@ -6,6 +6,9 @@ import subprocess
 from datetime import datetime
 from functools import partial
 
+import aiohttp
+from aiohttp import web
+
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ChatAction
 from aiogram.filters import Command, StateFilter
@@ -20,7 +23,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # Твої модулі
 import reports
 import visuals
-from config import BOT_TOKEN, USERS
+from config import BOT_TOKEN, USERS, MONO_TOKENS, WEBHOOK_URL
 from gs_manager import GoogleSheetManager
 
 # --- НАЛАШТУВАННЯ ---
@@ -36,6 +39,8 @@ CACHE = {
     "income_cats": [],
     "pending_reminders": {}
 }
+
+MONO_ACCOUNT_TO_USER = {}  # Карта: id_картки -> id_користувача_в_телеграм
 
 
 # --- СТАНИ (FSM) ---
@@ -131,6 +136,128 @@ def quick_edit_kb():
             InlineKeyboardButton(text="🗑 Відмінити", callback_data="qa_cancel")
         ]
     ])
+
+def generate_mono_keyboard(mono_id):
+    """Клавіатура вибору категорії для Автопілота"""
+    cats = CACHE.get("expense_cats", [])
+    kb_rows = []
+    row = []
+    
+    # Показуємо перші 8 категорій для швидкості
+    for cat in cats[:8]:
+        row.append(InlineKeyboardButton(text=cat, callback_data=f"monocat:{mono_id}:{cat}"))
+        if len(row) == 2:
+            kb_rows.append(row)
+            row = []
+    if row: kb_rows.append(row)
+    
+    # Кнопка скасування
+    kb_rows.append([InlineKeyboardButton(text="🗑 Ігнорувати (Не записувати)", callback_data=f"monodel:{mono_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+
+# ================= МОНОБАНК: ВЕБ-СЕРВЕР ТА АПІ =================
+async def setup_monobank():
+    """Автоматично підключає Webhook і дізнається ID карток."""
+    for user_name, token in MONO_TOKENS.items():
+        if not token or len(token) < 10: continue
+        
+        user_id = next((uid for uid, uname in USERS.items() if uname == user_name), None)
+        if not user_id: continue
+
+        async with aiohttp.ClientSession() as session:
+            headers = {"X-Token": token}
+            # 1. Оновлюємо Webhook URL у банку
+            try:
+                async with session.post("https://api.monobank.ua/personal/webhook", headers=headers, json={"webHookUrl": WEBHOOK_URL}) as resp:
+                    if resp.status == 200:
+                        print(f"✅ Webhook активовано для: {user_name}")
+                    else:
+                        print(f"❌ Помилка Webhook ({user_name}): {await resp.text()}")
+            except Exception as e:
+                print(f"🔴 Помилка мережі Mono: {e}")
+
+            # 2. Дізнаємось ID рахунків, щоб знати, чия це картка
+            try:
+                async with session.get("https://api.monobank.ua/personal/client-info", headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for acc in data.get("accounts", []):
+                            MONO_ACCOUNT_TO_USER[acc["id"]] = user_id
+                        print(f"✅ Знайдено {len(data.get('accounts', []))} рахунків для {user_name}")
+            except Exception as e:
+                print(f"🔴 Помилка отримання карток: {e}")
+
+
+async def mono_webhook_get(request):
+    """Монобанк відправляє сюди GET-запит, щоб перевірити, чи ми живі."""
+    return web.Response(text="OK", status=200)
+
+
+async def mono_webhook_post(request):
+    """Сюди прилітають транзакції (купили каву, продукти)."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.Response(status=400)
+
+    if data.get("type") == "StatementItem":
+        acc_id = data["data"]["account"]
+        statement = data["data"]["statementItem"]
+        
+        amount = statement.get("amount", 0) / 100.0  # З копійок у гривні
+        desc = statement.get("description", "Без опису")
+        mono_id = statement.get("id")
+        
+        user_id = MONO_ACCOUNT_TO_USER.get(acc_id)
+        
+        # Обробляємо ТІЛЬКИ витрати (amount < 0). Поповнення поки ігноруємо.
+        if user_id and amount < 0:
+            real_amount = abs(amount)
+            date_now = datetime.now().strftime("%d.%m.%Y")
+            who = USERS.get(user_id, "Unknown")
+            
+            note_with_id = f"mono_{mono_id}"
+            
+            # Записуємо в базу з категорією "Очікує"
+            success = await run_sync(
+                gs.add_transaction,
+                date_now, "❓ Очікує", real_amount, "Витрати", desc, note_with_id, who
+            )
+            
+            if success:
+                text = f"💳 <b>Нова витрата:</b>\n💰 {real_amount:.0f} грн\n🛒 {desc}\n\n<i>Обери категорію:</i>"
+                kb = generate_mono_keyboard(mono_id)
+                try:
+                    await bot.send_message(user_id, text, reply_markup=kb, parse_mode="HTML")
+                except:
+                    pass
+
+    return web.Response(text="OK", status=200)
+
+# Хендлери для кнопок Монобанку
+@dp.callback_query(F.data.startswith("monocat:"))
+async def mono_categorize(call: types.CallbackQuery):
+    _, mono_id, cat = call.data.split(":", 2)
+    await call.message.edit_text(f"⏳ <i>Зберігаю в {cat}...</i>", parse_mode="HTML")
+    
+    success = await run_sync(gs.update_transaction_category_by_mono_id, f"mono_{mono_id}", cat)
+    if success:
+        orig_text = call.message.text.replace("Обери категорію:", "").strip()
+        await call.message.edit_text(f"{orig_text}\n\n✅ <b>Записано в:</b> {cat}", parse_mode="HTML")
+    else:
+        await call.message.edit_text("❌ Помилка оновлення таблиці.")
+
+@dp.callback_query(F.data.startswith("monodel:"))
+async def mono_delete_tx(call: types.CallbackQuery):
+    _, mono_id = call.data.split(":", 1)
+    await call.message.edit_text("⏳ <i>Видаляю...</i>", parse_mode="HTML")
+    
+    success = await run_sync(gs.delete_transaction_by_mono_id, f"mono_{mono_id}")
+    if success:
+        await call.message.edit_text("🗑 Транзакцію скасовано (не записано в бюджет).")
+    else:
+        await call.message.edit_text("❌ Помилка видалення.")
 
 
 # --- START & MENU ---
@@ -670,10 +797,14 @@ async def pay_reminder(callback: CallbackQuery):
 
 # ================= STARTUP =================
 async def on_startup():
-    print("🚀 Bot starting...")
+    print("🚀 Запуск Телеграм-бота...")
     exp, inc = await run_sync(gs.get_categories)
     CACHE["expense_cats"] = exp
     CACHE["income_cats"] = inc
+    
+    # Запуск автопілота Mono
+    asyncio.create_task(setup_monobank())
+    
     scheduler.add_job(check_daily_reminders, 'cron', hour=9, minute=0)
     scheduler.add_job(partial(send_broadcast, "🌙 Не забудь записати витрати!"), 'cron', hour=21, minute=0)
     scheduler.start()
@@ -681,14 +812,34 @@ async def on_startup():
 
 async def send_broadcast(text):
     for uid in USERS:
-        try:
-            await bot.send_message(uid, text)
-        except:
-            pass
+        try: await bot.send_message(uid, text)
+        except: pass
+
+
+async def start_web_server():
+    """Запускає веб-сервер для прослуховування вебхуків Монобанку."""
+    app = web.Application()
+    app.router.add_get('/webhook', mono_webhook_get)
+    app.router.add_post('/webhook', mono_webhook_post)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    # 0.0.0.0 означає, що сервер приймає підключення звідусіль (через Cloudflare)
+    site = web.TCPSite(runner, '0.0.0.0', 18080)
+    await site.start()
+    print("🌐 Web-сервер Монобанку запущено на порту 18080!")
 
 async def main():
     dp.startup.register(on_startup)
+    
+    # 1. Запускаємо веб-сервер у фоні
+    await start_web_server()
+    
+    # 2. Запускаємо бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+Далі? (наступним повідомленням) 
+Одразу скажи як правильно замінити мій docker-compose.yml щоб не було конфліктів у самому каса ос
