@@ -888,6 +888,35 @@ async def pay_reminder(callback: CallbackQuery):
     await callback.message.edit_text(f"✅ <b>Сплачено!</b>\n▫️ {item['name']}", parse_mode="HTML")
 
 
+async def send_broadcast(text):
+    for uid in USERS:
+        try:
+            await bot.send_message(uid, text)
+        except:
+            pass
+
+async def evening_summary_broadcast():
+    summary = await run_sync(gs.get_daily_summary)
+    spent = summary.get("spent", 0)
+    unresolved = summary.get("unresolved", 0)
+    
+    text = "📰 <b>Вечірні новини BimiPal</b>\n➖➖➖➖➖➖\n"
+    text += f"💸 За сьогодні витрачено: <b>{spent:,.0f} грн</b>\n"
+    
+    if unresolved > 0:
+        text += f"📥 Нерозібраних операцій з Моно: <b>{unresolved}</b>\n\n"
+        text += "⚠️ <i>Проскрольте чат вгору та оберіть категорії для цих витрат, щоб закрити день під нуль!</i>"
+    else:
+        text += "\n✨ <b>Inbox Zero!</b> Усі транзакції розібрано. Ви супер!\n"
+        text += "Добраніч! Завтра новий день для нових накопичень на відпустку 🏖"
+        
+    for uid in USERS:
+        try:
+            await bot.send_message(uid, text, parse_mode="HTML")
+        except:
+            pass
+
+
 # ================= STARTUP =================
 async def on_startup():
     print("🚀 Запуск Телеграм-бота...")
@@ -899,17 +928,9 @@ async def on_startup():
     asyncio.create_task(setup_monobank())
     
     scheduler.add_job(check_daily_reminders, 'cron', hour=9, minute=0)
-    scheduler.add_job(partial(send_broadcast, "🌙 Не забудь записати витрати!"), 'cron', hour=21, minute=0)
+    scheduler.add_job(evening_summary_broadcast, 'cron', hour=21, minute=30)
     scheduler.start()
     await bot.delete_webhook(drop_pending_updates=True)
-
-async def send_broadcast(text):
-    for uid in USERS:
-        try:
-            await bot.send_message(uid, text)
-        except:
-            pass
-
 
 async def start_web_server():
     """Запускає веб-сервер для прослуховування вебхуків Монобанку."""

@@ -269,6 +269,47 @@ class GoogleSheetManager:
         except:
             return None
 
+    def get_daily_summary(self):
+        """Нова функція для вечірньої зводки новин."""
+        try:
+            all_values = self._get_all_rows_cached()
+            if not all_values or len(all_values) <= 2:
+                return {"spent": 0.0, "unresolved": 0}
+
+            data_rows = all_values[2:]
+            today_str = datetime.now().strftime("%d.%m.%Y")
+            
+            spent_today = 0.0
+            unresolved_count = 0
+            
+            for row in data_rows:
+                if not row or len(row) < 4 or not row[0]: continue
+                
+                row_date = row[0].strip()
+                if today_str not in row_date: 
+                    continue
+                
+                cat = row[1].strip()
+                t_type = row[3].strip()
+                try:
+                    amount = self._clean_amount(row[2])
+                except:
+                    amount = 0.0
+                
+                is_income = t_type in ["Поповнення", "Дохід", "Доходи"] or "Доход" in cat or "Поповнення" in cat
+                
+                if cat == "❓ Очікує":
+                    unresolved_count += 1
+                elif cat == "🔄 Переказ":
+                    pass  # Перекази не рахуємо як витрату
+                elif not is_income:
+                    spent_today += amount
+                    
+            return {"spent": spent_today, "unresolved": unresolved_count}
+        except Exception as e:
+            print(f"🔴 Error daily summary: {e}")
+            return {"spent": 0.0, "unresolved": 0}
+
     # --- REPORTS (PDF) ---
     def get_month_history(self, month, year):
         try:
