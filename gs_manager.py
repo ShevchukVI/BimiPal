@@ -467,3 +467,34 @@ class GoogleSheetManager:
             return False
         except:
             return False
+
+    def append_desc_by_mono_id(self, mono_id, added_text):
+        """Додає власний коментар до існуючого опису транзакції."""
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            cell = sheet.find(mono_id)
+            if cell:
+                old_desc = sheet.cell(cell.row, 5).value or ""
+                new_desc = f"{old_desc} ({added_text})" if old_desc else added_text
+                sheet.update_cell(cell.row, 5, new_desc)
+                self._clear_cache()
+                return True
+            return False
+        except:
+            return False
+
+    def convert_mono_to_transfer(self, mono_id, from_who, to_who):
+        """Видаляє Очікує-запис Моно і створює повноцінний Переказ (дві транзакції)."""
+        try:
+            sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            cell = sheet.find(mono_id)
+            if cell:
+                row_vals = sheet.row_values(cell.row)
+                amount = self._clean_amount(row_vals[2])
+                note = row_vals[4] if len(row_vals) > 4 else "Переказ з Моно"
+                sheet.delete_rows(cell.row)
+                self.add_transfer(amount, note, from_who, to_who)
+                return True
+            return False
+        except:
+            return False
