@@ -3,6 +3,7 @@ import logging
 import sys
 import html
 import subprocess
+import time
 from datetime import datetime
 from functools import partial
 
@@ -41,6 +42,12 @@ CACHE = {
 }
 
 MONO_ACCOUNT_TO_USER = {}  # Карта: id_картки -> id_користувача_в_телеграм
+
+# Кеш балансів Монобанку
+MONO_BALANCES_CACHE = {
+    "Вадим": {"time": 0, "balance": 0.0},
+    "Аня": {"time": 0, "balance": 0.0}
+}
 
 
 # --- СТАНИ (FSM) ---
@@ -199,6 +206,24 @@ async def setup_monobank():
                         print(f"✅ Знайдено {len(data.get('accounts', []))} рахунків для {user_name}")
             except Exception as e:
                 print(f"🔴 Помилка отримання карток: {e}")
+
+
+async def fetch_mono_balance(user_name):
+    token = MONO_TOKENS.get(user_name)
+    if not token or len(token) < 10: return 0.0
+    now = time.time()
+    if now - MONO_BALANCES_CACHE[user_name]["time"] < 65:
+        return MONO_BALANCES_CACHE[user_name]["balance"]
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get("https://api.monobank.ua/personal/client-info", headers={"X-Token": token}) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    total_bal = sum((acc.get("balance", 0) - acc.get("creditLimit", 0)) for acc in data.get("accounts", [])) / 100.0
+                    MONO_BALANCES_CACHE[user_name] = {"time": now, "balance": total_bal}
+                    return total_bal
+        except: pass
+    return MONO_BALANCES_CACHE[user_name]["balance"]
 
 
 async def mono_webhook_get(request):
@@ -769,20 +794,36 @@ async def curr_save(message: types.Message, state: FSMContext):
 async def show_stats(message: types.Message, state: FSMContext):
     await state.clear()
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+    
     stats = await run_sync(gs.get_month_stats)
-    if not stats: return await message.answer("❌ Помилка")
+    if not stats: return await message.answer("❌ Помилка завантаження таблиці")
 
-    text = (f"🧔‍♂️ <b>Вадим:</b> {stats['wallet_vadym']:,.0f}\n"
-            f"👩‍🦰 <b>Аня:</b> {stats['wallet_anya']:,.0f}\n"
-            f"🏦 <b>Разом:</b> {stats['total_wallet']:,.0f} грн\n"
-            f"🇺🇸 <b>Сейф:</b> {stats['usd_wallet']:,.0f} $\n"
-            f"➖➖➖➖➖➖\n📅 <b>{stats['month_name']}</b>:\n"
-            f"📉 Витрати: {stats['expense']:,.0f}\n"
-            f"📈 Дохід: {stats['income']:,.0f}\n"
-            f"💰 Баланс: {stats['balance']:,.0f}\n"
-            f"➖➖➖➖➖➖\n🏆 <b>Топ:</b>\n")
-    for cat, amt in stats['top_cats']: text += f"▫️ {cat}: {amt:,.0f}\n"
-    await message.answer(text, parse_mode="HTML")
+    mono_vadym = await fetch_mono_balance("Вадим")
+    mono_anya = await fetch_mono_balance("Аня")
+
+    cash_vadym = stats['wallet_vadym'] - mono_vadym
+    cash_anya = stats['wallet_anya'] - mono_anya
+
+    text = (
+        f"🧔‍♂️ <b>Вадим:</b> {stats['wallet_vadym']:,.0f} грн\n"
+        f"  ➖ Моно: <i>{mono_vadym:,.0f}</i>\n"
+        f"  ➖ Інше (Готівка): <i>{cash_vadym:,.0f}</i>\n\n"
+        f"👩‍🦰 <b>Аня:</b> {stats['wallet_anya']:,.0f} грн\n"
+        f"  ➖ Моно: <i>{mono_anya:,.0f}</i>\n"
+        f"  ➖ Інше (Готівка): <i>{cash_anya:,.0f}</i>\n\n"
+        f"🏦 <b>Разом:</b> {stats['total_wallet']:,.0f} грн\n"
+        f"🇺🇸 <b>Сейф:</b> {stats['usd_wallet']:,.0f} $\n"
+        f"➖➖➖➖➖➖\n"
+        f"📅 <b>{stats['month_name']}</b>:\n"
+        f"📉 Витрати: {stats['expense']:,.0f} грн\n"
+        f"📈 Дохід: {stats['income']:,.0f} грн\n"
+        f"💰 Баланс: {stats['balance']:,.0f} грн\n"
+        f"➖➖➖➖➖➖\n🏆 <b>Топ витрат:</b>\n"
+    )
+    for cat, amt in stats['top_cats']: 
+        text += f"▫️ {cat}: {amt:,.0f}\n"
+        
+    await message.answer(text.replace(",", " "), parse_mode="HTML")
 
 @dp.message(F.text == "🍰 Діаграма", StateFilter("*"))
 async def send_chart(message: types.Message):

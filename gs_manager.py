@@ -298,10 +298,11 @@ class GoogleSheetManager:
                 
                 is_income = t_type in ["Поповнення", "Дохід", "Доходи"] or "Доход" in cat or "Поповнення" in cat
                 
-                if cat == "❓ Очікує":
+                if cat == "🔄 Переказ":
+                    pass  # Перекази не рахуємо
+                elif cat == "❓ Очікує":
                     unresolved_count += 1
-                elif cat == "🔄 Переказ":
-                    pass  # Перекази не рахуємо як витрату
+                    spent_today += amount  # Тепер додаємо в суму дня!
                 elif not is_income:
                     spent_today += amount
                     
