@@ -19,12 +19,10 @@ class GoogleSheetManager:
         self.client = gspread.authorize(self.creds)
 
     def _clear_cache(self):
-        """Скидає кеш при будь-яких змінах у таблиці."""
         self._cached_data = None
         self._cache_time = 0
 
     def _get_all_rows_cached(self):
-        """Завантажує всю таблицю або віддає її з пам'яті (живе 60 секунд)."""
         now = time.time()
         if self._cached_data is not None and (now - self._cache_time < 60):
             return self._cached_data
@@ -184,7 +182,6 @@ class GoogleSheetManager:
                     cat = row[1].strip()
                     who = row[6].strip() if len(row) > 6 else ""
                     
-                    # Очищаємо дату від пробілів та іншого сміття
                     clean_date = re.sub(r'[^\d.]', '', row[0].strip())
                     t_date = datetime.strptime(clean_date, "%d.%m.%Y")
 
@@ -270,7 +267,6 @@ class GoogleSheetManager:
             return None
 
     def get_daily_summary(self):
-        """Нова функція для вечірньої зводки новин."""
         try:
             all_values = self._get_all_rows_cached()
             if not all_values or len(all_values) <= 2:
@@ -284,25 +280,21 @@ class GoogleSheetManager:
             
             for row in data_rows:
                 if not row or len(row) < 4 or not row[0]: continue
-                
                 row_date = row[0].strip()
-                if today_str not in row_date: 
-                    continue
+                if today_str not in row_date: continue
                 
                 cat = row[1].strip()
                 t_type = row[3].strip()
-                try:
-                    amount = self._clean_amount(row[2])
-                except:
-                    amount = 0.0
+                try: amount = self._clean_amount(row[2])
+                except: amount = 0.0
                 
                 is_income = t_type in ["Поповнення", "Дохід", "Доходи"] or "Доход" in cat or "Поповнення" in cat
                 
                 if cat == "🔄 Переказ":
-                    pass  # Перекази не рахуємо
+                    pass 
                 elif cat == "❓ Очікує":
                     unresolved_count += 1
-                    spent_today += amount  # Тепер додаємо в суму дня!
+                    spent_today += amount
                 elif not is_income:
                     spent_today += amount
                     
@@ -483,12 +475,10 @@ class GoogleSheetManager:
 
     # --- MONOBANK AUTOPILOT ---
     def update_transaction_category_by_mono_id(self, mono_id, new_category):
-        """Знаходить транзакцію за унікальним ID Монобанку і змінює її категорію."""
         try:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
             cell = sheet.find(mono_id)
             if cell:
-                # Оновлюємо клітинку в колонці B (Категорія)
                 sheet.update_cell(cell.row, 2, new_category)
                 self._clear_cache()
                 return True
@@ -498,7 +488,6 @@ class GoogleSheetManager:
             return False
 
     def delete_transaction_by_mono_id(self, mono_id):
-        """Видаляє транзакцію, якщо натиснуто кнопку Ігнорувати."""
         try:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
             cell = sheet.find(mono_id)
@@ -511,13 +500,12 @@ class GoogleSheetManager:
             return False
 
     def append_desc_by_mono_id(self, mono_id, added_text):
-        """Додає власний коментар до існуючого опису транзакції."""
         try:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
             cell = sheet.find(mono_id)
             if cell:
                 old_desc = sheet.cell(cell.row, 5).value or ""
-                new_desc = f"{old_desc} ({added_text})" if old_desc else added_text
+                new_desc = f"{old_desc} | {added_text}" if old_desc else added_text
                 sheet.update_cell(cell.row, 5, new_desc)
                 self._clear_cache()
                 return True
@@ -526,7 +514,6 @@ class GoogleSheetManager:
             return False
 
     def convert_mono_to_transfer(self, mono_id, from_who, to_who):
-        """Видаляє Очікує-запис Моно і створює повноцінний Переказ (дві транзакції)."""
         try:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
             cell = sheet.find(mono_id)
@@ -540,3 +527,32 @@ class GoogleSheetManager:
             return False
         except:
             return False
+
+    def get_unresolved_transactions(self):
+        """Повертає список всіх транзакцій зі статусом 'Очікує'."""
+        try:
+            all_values = self._get_all_rows_cached()
+            if not all_values or len(all_values) <= 2:
+                return []
+            
+            data_rows = all_values[2:]
+            unresolved = []
+            
+            for row in data_rows:
+                if len(row) >= 6 and row[1].strip() == "❓ Очікує":
+                    # Шукаємо mono_id у примітці (стовпець F)
+                    note_field = row[5]
+                    mono_id = note_field.replace("mono_", "").strip() if "mono_" in note_field else ""
+                    
+                    if mono_id:
+                        unresolved.append({
+                            "mono_id": mono_id,
+                            "date": row[0],
+                            "amount": self._clean_amount(row[2]),
+                            "desc": row[4],
+                            "who": row[6] if len(row) > 6 else ""
+                        })
+            return unresolved
+        except Exception as e:
+            print(f"🔴 Error getting unresolved: {e}")
+            return []

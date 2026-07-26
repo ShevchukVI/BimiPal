@@ -49,6 +49,8 @@ MONO_BALANCES_CACHE = {
     "Аня": {"time": 0, "balance": 0.0}
 }
 
+PROCESSED_MONO_IDS = set()  # Кеш для захисту від дублікатів від Монобанку
+
 
 # --- СТАНИ (FSM) ---
 class FinanceForm(StatesGroup):
@@ -120,7 +122,8 @@ def other_kb():
         "📜 Історія", "💸 Переказ",
         "🇺🇸 Валюта", "📄 Архів звітів",
         "📉 Звіт (Тиждень)", "🍰 Діаграма",
-        "🔔 Перевірити ліміти", "⚙️ Змінити ліміт"
+        "🔔 Перевірити ліміти", "⚙️ Змінити ліміт",
+        "🧹 Розібрати 'Очікує'"
     ], row_width=2, is_persistent=True, back_btn=True)
 
 def currency_kb():
@@ -160,6 +163,9 @@ def generate_mono_keyboard(mono_id, user_id):
             kb_rows.append(row)
             row = []
     if row: kb_rows.append(row)
+
+    # Кнопка для розгортання всього списку категорій
+    kb_rows.append([InlineKeyboardButton(text="📋 Всі категорії", callback_data=f"mall:{mono_id}")])
     
     # Додаємо кнопку переказу для партнера
     user_name = USERS.get(user_id, "")
@@ -226,23 +232,22 @@ async def fetch_mono_balance(user_name):
     return MONO_BALANCES_CACHE[user_name]["balance"]
 
 
-async def mono_webhook_get(request):
-    """Монобанк відправляє сюди GET-запит, щоб перевірити, чи ми живі."""
-    return web.Response(text="OK", status=200)
-
-
-async def mono_webhook_post(request):
-    """Сюди прилітають транзакції."""
-    try:
-        data = await request.json()
-    except Exception:
-        return web.Response(status=400)
-
+async def process_mono_webhook_background(data):
+    """Обробляє запит у фоні, щоб не блокувати відповідь Монобанку."""
     if data.get("type") == "StatementItem":
         acc_id = data["data"]["account"]
         statement = data["data"]["statementItem"]
         
-        amount = statement.get("amount", 0) / 100.0  # З копійок у гривні
+        mono_id = statement.get("id")
+        
+        # ЗАХИСТ ВІД ДУБЛІКАТІВ
+        if mono_id in PROCESSED_MONO_IDS:
+            return
+        PROCESSED_MONO_IDS.add(mono_id)
+        if len(PROCESSED_MONO_IDS) > 5000:
+            PROCESSED_MONO_IDS.clear() # Очистка від переповнення пам'яті
+        
+        amount = statement.get("amount", 0) / 100.0
         desc = statement.get("description", "Без опису")
         
         # Додаємо коментар до опису, якщо він є
@@ -250,7 +255,6 @@ async def mono_webhook_post(request):
         if comment:
             desc = f"{desc} ({comment})"
             
-        mono_id = statement.get("id")
         user_id = MONO_ACCOUNT_TO_USER.get(acc_id)
         
         # Обробляємо ТІЛЬКИ витрати (amount < 0).
@@ -274,10 +278,90 @@ async def mono_webhook_post(request):
                 except Exception as e:
                     print(f"🔴 Помилка відправки в ТГ: {e}")
 
+
+async def mono_webhook_get(request):
+    """Монобанк відправляє сюди GET-запит, щоб перевірити, чи ми живі."""
     return web.Response(text="OK", status=200)
 
 
+async def mono_webhook_post(request):
+    """Сюди прилітають транзакції."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.Response(status=400)
+
+    # Запускаємо обробку як незалежну задачу, а самі одразу кажемо Монобанку OK (захист від дублікатів)
+    asyncio.create_task(process_mono_webhook_background(data))
+    return web.Response(text="OK", status=200)
+
+
+# ================= INBOX ZERO (РОЗБІР 'ОЧІКУЄ') =================
+async def send_next_unresolved(chat_id, user_name):
+    """Знаходить і надсилає користувачу наступну нерозібрану транзакцію."""
+    await bot.send_chat_action(chat_id, ChatAction.TYPING)
+    unresolved_all = await run_sync(gs.get_unresolved_transactions)
+    
+    # Фільтруємо тільки ті, що належать цьому користувачу
+    user_unresolved = [tx for tx in unresolved_all if tx["who"] == user_name]
+    
+    if not user_unresolved:
+        await bot.send_message(chat_id, "🎉 <b>Все чисто!</b> Нерозібраних транзакцій немає.", parse_mode="HTML")
+        return
+
+    # Беремо найпершу
+    tx = user_unresolved[0]
+    mono_id = tx["mono_id"]
+    text = f"⏳ <b>Нерозібрана витрата:</b>\n📅 {tx['date']}\n💰 {tx['amount']:.2f} грн\n🛒 {tx['desc']}\n\n<i>Обери категорію:</i>"
+    
+    user_id = next((uid for uid, uname in USERS.items() if uname == user_name), chat_id)
+    kb = generate_mono_keyboard(mono_id, user_id)
+    
+    await bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
+
+@dp.message(F.text == "🧹 Розібрати 'Очікує'", StateFilter("*"))
+async def trigger_inbox_zero(message: types.Message):
+    user_name = USERS.get(message.from_user.id)
+    if user_name:
+        await send_next_unresolved(message.chat.id, user_name)
+
+@dp.callback_query(F.data == "mnext")
+async def trigger_next_unresolved_btn(call: types.CallbackQuery):
+    user_name = USERS.get(call.from_user.id)
+    if user_name:
+        try:
+            await call.message.edit_reply_markup(reply_markup=None)
+        except:
+            pass
+        await send_next_unresolved(call.message.chat.id, user_name)
+
+
 # ================= ХЕНДЛЕРИ КНОПОК МОНОБАНКУ =================
+
+@dp.callback_query(F.data.startswith("mall:"))
+async def mono_all_cats(call: types.CallbackQuery):
+    _, mono_id = call.data.split(":", 1)
+    cats = CACHE.get("expense_cats", [])
+    kb_rows = []
+    row = []
+    
+    for idx, cat in enumerate(cats):
+        row.append(InlineKeyboardButton(text=cat, callback_data=f"mcat:{mono_id}:{idx}"))
+        if len(row) == 2:
+            kb_rows.append(row)
+            row = []
+    if row: kb_rows.append(row)
+    
+    kb_rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data=f"mback:{mono_id}")])
+    await call.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+
+
+@dp.callback_query(F.data.startswith("mback:"))
+async def mono_back_cats(call: types.CallbackQuery):
+    _, mono_id = call.data.split(":", 1)
+    kb = generate_mono_keyboard(mono_id, call.from_user.id)
+    await call.message.edit_reply_markup(reply_markup=kb)
+
 
 @dp.callback_query(F.data.startswith("mcat:"))
 async def mono_categorize(call: types.CallbackQuery):
@@ -293,6 +377,7 @@ async def mono_categorize(call: types.CallbackQuery):
     success = await run_sync(gs.update_transaction_category_by_mono_id, f"mono_{mono_id}", cat)
     if success:
         orig_text = call.message.text.replace("Обери категорію:", "").strip()
+        orig_text = orig_text.replace("Нерозібрана витрата:", "Нова витрата:")
         
         # Пропонуємо додати свій коментар
         kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -307,7 +392,8 @@ async def mono_categorize(call: types.CallbackQuery):
 @dp.callback_query(F.data == "mdon")
 async def mono_done(call: types.CallbackQuery):
     text = call.message.text.replace("Бажаєш додати деталі покупки?", "").strip()
-    await call.message.edit_text(f"{text}\n✅ Готово.", parse_mode="HTML")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➡️ Розібрати наступну", callback_data="mnext")]])
+    await call.message.edit_text(f"{text}\n✅ Готово.", reply_markup=kb, parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("mdsc:"))
@@ -330,7 +416,8 @@ async def mono_save_desc(message: types.Message, state: FSMContext):
     
     success = await run_sync(gs.append_desc_by_mono_id, f"mono_{mono_id}", message.text)
     if success:
-        await message.answer("✅ Твій коментар успішно додано!")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➡️ Розібрати наступну", callback_data="mnext")]])
+        await message.answer("✅ Твій коментар успішно додано!", reply_markup=kb)
         
         # Оновлюємо старе повідомлення, щоб воно виглядало гарно
         clean_text = orig_text.replace("Бажаєш додати деталі покупки?", "").strip()
@@ -355,7 +442,9 @@ async def mono_transfer(call: types.CallbackQuery):
     success = await run_sync(gs.convert_mono_to_transfer, f"mono_{mono_id}", user_name, partner)
     if success:
         orig_text = call.message.text.replace("Обери категорію:", "").strip()
-        await call.message.edit_text(f"{orig_text}\n\n✅ <b>Оформлено як переказ:</b> {user_name} ➡️ {partner}", parse_mode="HTML")
+        orig_text = orig_text.replace("Нерозібрана витрата:", "Нова витрата:")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➡️ Розібрати наступну", callback_data="mnext")]])
+        await call.message.edit_text(f"{orig_text}\n\n✅ <b>Оформлено як переказ:</b> {user_name} ➡️ {partner}", reply_markup=kb, parse_mode="HTML")
     else:
         await call.message.edit_text("❌ Помилка запису переказу.")
 
@@ -363,7 +452,8 @@ async def mono_transfer(call: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("mltr:"))
 async def mono_later(call: types.CallbackQuery):
     orig_text = call.message.text.replace("Обери категорію:", "").strip()
-    await call.message.edit_text(f"{orig_text}\n\n⏳ <b>Відкладено на потім.</b>", parse_mode="HTML")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➡️ Розібрати наступну", callback_data="mnext")]])
+    await call.message.edit_text(f"{orig_text}\n\n⏳ <b>Відкладено на потім.</b>", reply_markup=kb, parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("mdel:"))
@@ -373,7 +463,8 @@ async def mono_delete_tx(call: types.CallbackQuery):
     
     success = await run_sync(gs.delete_transaction_by_mono_id, f"mono_{mono_id}")
     if success:
-        await call.message.edit_text("🗑 Цю транзакцію стерто. Її немає в бюджеті.")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➡️ Розібрати наступну", callback_data="mnext")]])
+        await call.message.edit_text("🗑 Цю транзакцію стерто. Її немає в бюджеті.", reply_markup=kb)
     else:
         await call.message.edit_text("❌ Помилка видалення.")
 
@@ -944,16 +1035,18 @@ async def evening_summary_broadcast():
     text = "📰 <b>Вечірні новини BimiPal</b>\n➖➖➖➖➖➖\n"
     text += f"💸 За сьогодні витрачено: <b>{spent:,.0f} грн</b>\n"
     
+    kb = None
     if unresolved > 0:
         text += f"📥 Нерозібраних операцій з Моно: <b>{unresolved}</b>\n\n"
-        text += "⚠️ <i>Проскрольте чат вгору та оберіть категорії для цих витрат, щоб закрити день під нуль!</i>"
+        text += "⚠️ <i>Давайте розкидаємо їх по поличках!</i>"
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🧹 Розібрати накопичене", callback_data="mnext")]])
     else:
         text += "\n✨ <b>Inbox Zero!</b> Усі транзакції розібрано. Ви супер!\n"
         text += "Добраніч! Завтра новий день для нових накопичень на відпустку 🏖"
         
     for uid in USERS:
         try:
-            await bot.send_message(uid, text, parse_mode="HTML")
+            await bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
         except:
             pass
 
