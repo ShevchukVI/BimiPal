@@ -132,6 +132,7 @@ def quick_edit_kb(): return InlineKeyboardMarkup(inline_keyboard=[
 
 
 def generate_mono_keyboard(mono_id, user_id):
+    """Клавіатура вибору категорії для Автопілота (безпечна для Телеграму)"""
     cats = CACHE.get("expense_cats", [])
     kb_rows, row = [], []
     for idx, cat in enumerate(cats[:8]):
@@ -367,11 +368,10 @@ async def mono_transfer(call: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("mltr:"))
 async def mono_later(call: types.CallbackQuery):
-    await call.message.edit_text(
-        f"{call.message.text.replace('Обери категорію:', '').strip()}\n\n⏳ <b>Відкладено на потім.</b>",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="➡️ Розібрати наступну", callback_data="mnext")]]),
-        parse_mode="HTML")
+    orig_text = call.message.text.replace("Обери категорію:", "").strip()
+    await call.message.edit_text(f"{orig_text}\n\n⏳ <b>Відкладено на потім.</b>", reply_markup=InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="➡️ Розібрати наступну", callback_data="mnext")]]),
+                                 parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("mdel:"))
@@ -396,12 +396,12 @@ def receipt_action_kb():
 
 @dp.message(F.photo, StateFilter("*"))
 async def handle_receipt_photo(message: types.Message, state: FSMContext):
-    """Обробка фото чеку та пропозиція дій."""
+    """Обробка надісланого фото чеку через OpenRouter Vision."""
     if not ai_manager:
         return await message.answer("🤖 Функції ШІ зараз вимкнені (ai_service не знайдено).")
 
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-    msg = await message.answer("🔍 <i>Штучний інтелект аналізує чек. Це може зайняти 10-15 секунд...</i>",
+    msg = await message.answer("🔍 <i>Штучний інтелект аналізує чек. Це може зайняти 10-25 секунд...</i>",
                                parse_mode="HTML")
 
     try:
@@ -411,18 +411,23 @@ async def handle_receipt_photo(message: types.Message, state: FSMContext):
         base64_image = base64.b64encode(downloaded_file.read()).decode('utf-8')
 
         result = await ai_manager.parse_receipt_image(base64_image)
+
         if not result:
-            return await msg.edit_text("❌ ШІ не зміг розпізнати цей чек. Спробуй краще фото або введи вручну.")
+            return await msg.edit_text(
+                "❌ ШІ не зміг розпізнати цей чек або сервери OpenRouter перевантажені. Спробуй ще раз пізніше.")
 
         shop_name = result.get("shop_name", "Невідомий магазин")
         total = result.get("total_amount", 0.0)
         items = result.get("items", [])
 
         items_text = ", ".join(items)
-        if len(items_text) > 150: items_text = items_text[:147] + "..."
+        # Знято жорстке обмеження на обрізку для відображення
         desc = f"{shop_name} ({items_text})"
 
-        # Зберігаємо розпізнані дані
+        # Обрізаємо опис тільки для запису в базу, якщо він більший за 800 символів (щоб не зламати Google Sheets/Телеграм)
+        if len(desc) > 800:
+            desc = desc[:797] + "..."
+
         await state.update_data(amount=total, description=desc, t_type="Витрати")
 
         text = (f"🧾 <b>Чек розпізнано!</b>\n"
@@ -435,12 +440,11 @@ async def handle_receipt_photo(message: types.Message, state: FSMContext):
         await message.answer(text, reply_markup=receipt_action_kb(), parse_mode="HTML")
 
     except Exception as e:
-        await msg.edit_text(f"❌ Критична помилка фото: {e}")
+        await msg.edit_text(f"❌ Виникла критична помилка під час обробки фото: {e}")
 
 
 @dp.callback_query(F.data == "rcpt_new")
 async def receipt_new_tx(call: types.CallbackQuery, state: FSMContext):
-    """Шлях 1: Створення повністю нової транзакції з чека."""
     await call.message.edit_text(f"{call.message.text}\n\n<i>Обери категорію для нової витрати:</i>",
                                  reply_markup=categories_kb(is_expense=True), parse_mode="HTML")
     await state.set_state(ReceiptForm.confirm_cat)
@@ -465,7 +469,6 @@ async def confirm_receipt_category(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "rcpt_link")
 async def receipt_link_tx(call: types.CallbackQuery):
-    """Шлях 2: Показ списку нерозібраних транзакцій для прив'язки."""
     user_name = USERS.get(call.from_user.id)
     unresolved_all = await run_sync(gs.get_unresolved_transactions)
     user_unresolved = [tx for tx in unresolved_all if tx["who"] == user_name]
@@ -478,7 +481,6 @@ async def receipt_link_tx(call: types.CallbackQuery):
                                  [InlineKeyboardButton(text="❌ Скасувати", callback_data="rcpt_cancel")]]))
 
     kb_rows = []
-    # Показуємо останні 5 нерозібраних транзакцій
     for tx in user_unresolved[:5]:
         btn_text = f"{tx['amount']} грн | {tx['desc'][:20]}"
         kb_rows.append([InlineKeyboardButton(text=btn_text, callback_data=f"rlnk:{tx['mono_id']}")])
@@ -491,14 +493,11 @@ async def receipt_link_tx(call: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("rlnk:"))
 async def receipt_do_link(call: types.CallbackQuery, state: FSMContext):
-    """Шлях 2: Фактична прив'язка чека до обраної транзакції."""
     mono_id = call.data.split(":")[1]
     data = await state.get_data()
     desc = data.get("description", "Чек")
 
     await bot.send_chat_action(call.message.chat.id, ChatAction.TYPING)
-
-    # Дописуємо товари з чека в коментар Моно-транзакції
     success = await run_sync(gs.append_desc_by_mono_id, f"mono_{mono_id}", f"🧾 {desc}")
 
     if success:
@@ -602,20 +601,12 @@ async def full_amt(message: types.Message, state: FSMContext):
 async def full_save(message: types.Message, state: FSMContext):
     data = await state.get_data()
     who = USERS.get(message.from_user.id, "Unknown")
-
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-
     await run_sync(
         gs.add_transaction,
         datetime.now().strftime("%d.%m.%Y"),
-        data['category'],
-        data['amount'],
-        data['t_type'],
-        message.text,
-        "Bot",
-        who
+        data['category'], data['amount'], data['t_type'], message.text, "Bot", who
     )
-
     alert = ""
     if data['t_type'] == "Витрати":
         limits = await run_sync(gs.get_budget_limits)
@@ -625,7 +616,6 @@ async def full_save(message: types.Message, state: FSMContext):
             spent = stats['categories_dict'].get(data['category'], 0)
             if spent > limit:
                 alert = f"\n⚠️ <b>Переліміт!</b> {spent:.0f} / {limit:.0f}"
-
     await message.answer(f"✅ Записано: {data['amount']} грн ({data['category']}){alert}", reply_markup=main_kb(),
                          parse_mode="HTML")
     await state.clear()
@@ -648,16 +638,13 @@ async def handle_quick_action(message: types.Message):
 
     who = USERS.get(message.from_user.id, "Unknown")
     date_now = datetime.now().strftime("%d.%m.%Y")
-
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     res = await run_sync(gs.add_transaction, date_now, cat, amount, "Витрати", desc, "QuickAction", who)
 
     if res:
         await message.answer(
             f"✅ Швидко записано: <b>{amount} грн</b> ({cat})\n<i>Якщо сума інша — натисни кнопку нижче.</i>",
-            parse_mode="HTML",
-            reply_markup=quick_edit_kb()
-        )
+            parse_mode="HTML", reply_markup=quick_edit_kb())
     else:
         await message.answer("❌ Помилка запису.", reply_markup=quick_kb())
 
@@ -683,10 +670,8 @@ async def qa_edit_finish(message: types.Message, state: FSMContext):
         new_amt = float(message.text.replace(',', '.'))
     except ValueError:
         return await message.answer("❌ Це не число. Спробуй ще раз.")
-
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     res = await run_sync(gs.update_last_transaction_amount, new_amt)
-
     if res:
         await message.answer(f"✅ Суму успішно змінено на <b>{new_amt} грн</b>!", parse_mode="HTML")
     else:
@@ -715,7 +700,6 @@ async def transfer_dir(message: types.Message, state: FSMContext):
         await state.update_data(from_who="Аня", to_who="Вадим")
     else:
         return await message.answer("Обери кнопку.")
-
     await state.set_state(TransferForm.amount)
     await message.answer("Яку суму переказуємо?", reply_markup=ReplyKeyboardRemove())
 
@@ -730,18 +714,11 @@ async def transfer_save(message: types.Message, state: FSMContext):
     data = await state.get_data()
     note = message.text
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-
     res = await run_sync(gs.add_transfer, data['amount'], note, data['from_who'], data['to_who'])
-
     if res:
         await message.answer(
-            f"✅ <b>Успішно!</b>\n"
-            f"📤 {data['from_who']}: -{data['amount']} грн\n"
-            f"📥 {data['to_who']}: +{data['amount']} грн\n"
-            f"💬 <i>{note}</i>",
-            reply_markup=main_kb(),
-            parse_mode="HTML"
-        )
+            f"✅ <b>Успішно!</b>\n📤 {data['from_who']}: -{data['amount']} грн\n📥 {data['to_who']}: +{data['amount']} грн\n💬 <i>{note}</i>",
+            reply_markup=main_kb(), parse_mode="HTML")
     else:
         await message.answer("❌ Помилка запису.", reply_markup=main_kb())
     await state.clear()
@@ -757,7 +734,6 @@ async def render_history(message: types.Message, page=1, is_edit=False):
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     PAGE_SIZE = 5
     last_txs = await run_sync(gs.get_last_transactions, page, PAGE_SIZE)
-
     if not last_txs and page == 1:
         text = "📭 Історія порожня."
         if is_edit:
@@ -765,34 +741,25 @@ async def render_history(message: types.Message, page=1, is_edit=False):
         else:
             await message.answer(text)
         return
-
     text = f"📜 <b>Історія (Стор. {page})</b>\n\n"
     buttons = []
-
     for tx in last_txs:
         safe_cat = html.escape(str(tx['category']))
         safe_desc = html.escape(str(tx['desc']))
         who_icon = "🧔‍♂️" if "Вадим" in str(tx['who']) else "👩‍🦰" if "Аня" in str(tx['who']) else "🤖"
-
         text += f"▫️ {tx['date']} | {safe_cat}: <b>{tx['amount']}</b> {who_icon}\n"
         if safe_desc: text += f"   <i>({safe_desc})</i>\n"
-
         buttons.append(
             InlineKeyboardButton(text=f"🗑 Вид. ({tx['amount']})", callback_data=f"ask_del:{tx['id']}:{page}"))
         text += "➖➖➖➖➖➖\n"
-
     nav_row = []
-    if page > 1:
-        nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"hist_page:{page - 1}"))
-    if len(last_txs) == PAGE_SIZE:
-        nav_row.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"hist_page:{page + 1}"))
-
+    if page > 1: nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"hist_page:{page - 1}"))
+    if len(last_txs) == PAGE_SIZE: nav_row.append(
+        InlineKeyboardButton(text="Вперед ➡️", callback_data=f"hist_page:{page + 1}"))
     kb_rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     if nav_row: kb_rows.append(nav_row)
     kb_rows.append([InlineKeyboardButton(text="🔄 Оновити", callback_data=f"hist_page:{page}")])
-
     markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
-
     if is_edit:
         try:
             await message.edit_text(text, reply_markup=markup, parse_mode="HTML")
@@ -812,21 +779,17 @@ async def history_nav(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("ask_del:"))
 async def ask_delete(callback: CallbackQuery):
     _, tx_id, page = callback.data.split(":")
-
-    text = "⚠️ <b>Ви справді хочете видалити цей запис?</b>\nЦе неможливо скасувати."
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Так", callback_data=f"do_del:{tx_id}:{page}"),
-            InlineKeyboardButton(text="❌ Ні", callback_data=f"hist_page:{page}")
-        ]
+        [InlineKeyboardButton(text="✅ Так", callback_data=f"do_del:{tx_id}:{page}"),
+         InlineKeyboardButton(text="❌ Ні", callback_data=f"hist_page:{page}")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await callback.message.edit_text("⚠️ <b>Ви справді хочете видалити цей запис?</b>\nЦе неможливо скасувати.",
+                                     reply_markup=kb, parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("do_del:"))
 async def perform_delete(callback: CallbackQuery):
     _, tx_id, page = callback.data.split(":")
-
     if await run_sync(gs.delete_transaction_by_row, int(tx_id)):
         await callback.answer("✅ Видалено")
         await render_history(callback.message, page=int(page), is_edit=True)
@@ -869,24 +832,16 @@ async def report_month(message: types.Message, state: FSMContext):
     if message.text == "🔙 Назад":
         await state.set_state(ReportForm.year)
         return await message.answer("Рік:")
-
     month_map = {"Січень": 1, "Лютий": 2, "Березень": 3, "Квітень": 4, "Травень": 5, "Червень": 6, "Липень": 7,
                  "Серпень": 8, "Вересень": 9, "Жовтень": 10, "Листопад": 11, "Грудень": 12}
-    if message.text not in month_map:
-        return await message.answer("Обери кнопку")
-
+    if message.text not in month_map: return await message.answer("Обери кнопку")
     data_state = await state.get_data()
     year = data_state['year']
     month = month_map[message.text]
-
     await message.answer(f"⏳ Звіт за {message.text} {year}...", reply_markup=other_kb())
     await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_DOCUMENT)
-
     data = await run_sync(gs.get_month_history, month, year)
-
-    if not data:
-        return await message.answer("❌ Немає даних")
-
+    if not data: return await message.answer("❌ Немає даних")
     try:
         pdf = await run_sync(reports.generate_monthly_report, data, message.text, year)
         filename = f"Report_{message.text}_{year}.pdf"
@@ -894,7 +849,6 @@ async def report_month(message: types.Message, state: FSMContext):
                                       caption=f"📊 Звіт за <b>{message.text} {year}</b> готовий!", parse_mode="HTML")
     except Exception as e:
         await message.answer(f"❌ Помилка: {e}")
-
     await state.clear()
 
 
@@ -925,19 +879,13 @@ async def curr_rate(message: types.Message, state: FSMContext):
 @dp.message(CurrencyForm.description)
 async def curr_save(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    usd = data['amount_usd']
-    rate = data['rate']
-    op = data['op']
-    note = message.text
-    who = USERS.get(message.from_user.id, "Unknown")
+    usd, rate, op, note, who = data['amount_usd'], data['rate'], data['op'], message.text, USERS.get(
+        message.from_user.id, "Unknown")
     date = datetime.now().strftime("%d.%m.%Y")
     uah_val = usd * rate
-
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-
     usd_sign = usd if op in ["📥 Купив $", "💰 Отримав $"] else -usd
     await run_sync(gs.add_currency_transaction, date, op, usd_sign, rate, uah_val, note)
-
     msg = "✅ Операцію збережено."
     if op == "📥 Купив $":
         await run_sync(gs.add_transaction, date, "💵 Купівля валюти", uah_val, "Витрати", f"{usd}$ по {rate}",
@@ -947,7 +895,6 @@ async def curr_save(message: types.Message, state: FSMContext):
         await run_sync(gs.add_transaction, date, "🔁 Обмін валют", uah_val, "Поповнення", f"Продав {usd}$ по {rate}",
                        "Auto-Currency", who)
         msg = f"✅ Продав {usd}$ за {uah_val:.0f} грн.\nГривні зараховано."
-
     await message.answer(msg, reply_markup=main_kb())
     await state.clear()
 
@@ -956,13 +903,10 @@ async def curr_save(message: types.Message, state: FSMContext):
 async def show_stats(message: types.Message, state: FSMContext):
     await state.clear()
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-
     stats = await run_sync(gs.get_month_stats)
     if not stats: return await message.answer("❌ Помилка завантаження таблиці")
-
     mono_vadym = await fetch_mono_balance("Вадим")
     mono_anya = await fetch_mono_balance("Аня")
-
     cash_vadym = stats['wallet_vadym'] - mono_vadym
     cash_anya = stats['wallet_anya'] - mono_anya
 
@@ -982,9 +926,7 @@ async def show_stats(message: types.Message, state: FSMContext):
         f"💰 Баланс: {stats['balance']:,.0f} грн\n"
         f"➖➖➖➖➖➖\n🏆 <b>Топ витрат:</b>\n"
     )
-    for cat, amt in stats['top_cats']:
-        text += f"▫️ {cat}: {amt:,.0f}\n"
-
+    for cat, amt in stats['top_cats']: text += f"▫️ {cat}: {amt:,.0f}\n"
     await message.answer(text.replace(",", " "), parse_mode="HTML")
 
 
@@ -993,7 +935,6 @@ async def send_chart(message: types.Message):
     await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_PHOTO)
     stats = await run_sync(gs.get_month_stats)
     if not stats or not stats['categories_dict']: return await message.answer("❌ Мало даних.")
-
     img_buf = await run_sync(visuals.generate_pie_chart, stats['categories_dict'],
                              title=f"Витрати: {stats['month_name']}")
     if img_buf:
@@ -1021,7 +962,6 @@ async def check_limits(message: types.Message, state: FSMContext):
     limits = await run_sync(gs.get_budget_limits)
     stats = await run_sync(gs.get_month_stats)
     if not limits: return await message.answer("🤷‍♂️ Лімітів немає")
-
     text = "👮‍♂️ <b>Ліміти:</b>\n"
     for cat, limit in limits.items():
         spent = stats['categories_dict'].get(cat, 0)
@@ -1063,7 +1003,6 @@ async def edit_limit_save(message: types.Message, state: FSMContext):
 async def check_daily_reminders():
     reminders = await run_sync(gs.get_due_reminders)
     if not reminders: return
-
     for item in reminders:
         row_idx = str(item['row_idx'])
         CACHE["pending_reminders"][row_idx] = item
@@ -1085,7 +1024,6 @@ async def pay_reminder(callback: CallbackQuery):
         reminders = await run_sync(gs.get_due_reminders)
         item = next((r for r in reminders if str(r['row_idx']) == row_idx), None)
     if not item: return await callback.answer("❌ Вже сплачено", show_alert=True)
-
     await callback.message.edit_text(f"{callback.message.text}\n\n⏳ <i>Сплачую...</i>", parse_mode="HTML")
     who = USERS.get(callback.from_user.id, "Bot")
     date_now = datetime.now().strftime("%d.%m.%Y")
@@ -1109,26 +1047,19 @@ async def evening_summary_broadcast():
     summary = await run_sync(gs.get_daily_summary)
     spent = summary.get("spent", 0)
     unresolved = summary.get("unresolved", 0)
-
     text = "📰 <b>Вечірні новини BimiPal</b>\n➖➖➖➖➖➖\n"
     text += f"💸 За сьогодні витрачено: <b>{spent:,.0f} грн</b>\n"
-
     if ai_manager:
         transactions_text = await run_sync(gs.get_today_transactions_text)
         insight = await ai_manager.generate_daily_insight(spent, "Невідомо (поки що)", transactions_text)
-        if insight:
-            text += f"\n🤖 <b>Інсайт від Bimi:</b>\n<i>{insight.strip()}</i>\n"
-
+        if insight: text += f"\n🤖 <b>Інсайт від Bimi:</b>\n<i>{insight.strip()}</i>\n"
     kb = None
     if unresolved > 0:
-        text += f"\n📥 Нерозібраних операцій з Моно: <b>{unresolved}</b>\n\n"
-        text += "⚠️ <i>Давайте розкидаємо їх по поличках!</i>"
+        text += f"\n📥 Нерозібраних операцій з Моно: <b>{unresolved}</b>\n\n⚠️ <i>Давайте розкидаємо їх по поличках!</i>"
         kb = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="🧹 Розібрати накопичене", callback_data="mnext")]])
     else:
-        text += "\n✨ <b>Inbox Zero!</b> Усі транзакції розібрано. Ви супер!\n"
-        text += "Добраніч! Завтра новий день для нових накопичень на відпустку 🏖"
-
+        text += "\n✨ <b>Inbox Zero!</b> Усі транзакції розібрано. Ви супер!\nДобраніч! Завтра новий день для нових накопичень на відпустку 🏖"
     for uid in USERS:
         try:
             await bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
@@ -1141,9 +1072,7 @@ async def on_startup():
     exp, inc = await run_sync(gs.get_categories)
     CACHE["expense_cats"] = exp
     CACHE["income_cats"] = inc
-
     asyncio.create_task(setup_monobank())
-
     scheduler.add_job(check_daily_reminders, 'cron', hour=9, minute=0)
     scheduler.add_job(evening_summary_broadcast, 'cron', hour=21, minute=30)
     scheduler.start()
@@ -1154,7 +1083,6 @@ async def start_web_server():
     app = web.Application()
     app.router.add_get('/webhook', mono_webhook_get)
     app.router.add_post('/webhook', mono_webhook_post)
-
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 18080)
