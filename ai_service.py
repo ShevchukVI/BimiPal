@@ -11,14 +11,12 @@ logger = logging.getLogger(__name__)
 
 class AIManager:
     def __init__(self):
-        # Ініціалізуємо клієнт OpenAI, але направляємо його на сервери OpenRouter
         self.client = AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=OPENROUTER_API_KEY,
         )
 
     async def _safe_request(self, messages, model, max_retries=3):
-        """Внутрішня функція з exponential backoff для обробки помилок 429."""
         delay = 2
         for attempt in range(max_retries):
             try:
@@ -32,66 +30,48 @@ class AIManager:
                 logger.error(f"ШІ Помилка (Спроба {attempt + 1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(delay)
-                    delay *= 2  # 2s, 4s, 8s...
+                    delay *= 2
                 else:
                     return None
 
     async def parse_receipt_image(self, base64_image: str):
-        """Модуль А: Парсинг чеку (Vision). Повертає JSON словник або None."""
         if not OPENROUTER_API_KEY or len(OPENROUTER_API_KEY) < 10: return None
-
-        system_prompt = """
-        Ти фінансовий парсер. Твоє завдання витягнути з фото чеку інформацію і повернути її СУВОРО у форматі JSON без маркдауну та зайвого тексту.
-        Формат:
-        {
-            "shop_name": "Назва магазину (Сільпо, АТБ тощо)",
-            "total_amount": 105.50,
-            "items": ["Молоко", "Хліб"]
-        }
-        Якщо щось не можеш прочитати, поверни null або порожній масив.
-        """
-
+        system_prompt = """Ти парсер чеків. Твоє завдання витягнути інформацію і повернути її СУВОРО у форматі JSON без маркдауну та зайвого тексту. Формат: {"shop_name": "Назва", "total_amount": 105.50, "items": ["Молоко", "Хліб"]}"""
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": [
-                {"type": "text", "text": "Розпізнай цей чек."},
+                {"type": "text", "text": "Розпізнай цей чек і видай JSON."},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
             ]}
         ]
-
         raw_response = await self._safe_request(messages, AI_VISION_MODEL)
         if not raw_response: return None
-
-        # Парсимо JSON, обрізаючи можливі маркдаун блоки (```json ... ```)
         try:
             clean_json = re.sub(r'```json|```', '', raw_response).strip()
             return json.loads(clean_json)
-        except Exception as e:
-            logger.error(f"Не вдалося спарсити JSON від ШІ: {e}")
+        except:
             return None
 
     async def generate_daily_insight(self, spent_amount, remaining_limit, transactions_text):
-        """Модуль Б: Вечірня аналітика. Аналізує сьогоднішні витрати і дає коротку пораду."""
         if not OPENROUTER_API_KEY or len(OPENROUTER_API_KEY) < 10: return None
         if spent_amount == 0 and not transactions_text: return None
 
         system_prompt = """
-        Ти дружній сімейний фінансовий радник Bimi. Твоя мета - допомогти Вадиму та Ані накопичити гроші на відпустку.
-        Тобі дадуть список витрат за сьогодні і загальну суму.
-        Твоє завдання: написати ОДИН короткий абзац (до 3 речень) живим тоном.
-        Хвали за економію, жартуй, або м'яко попереджай, якщо гроші витрачаються занадто швидко на дурниці (наприклад, багато кави чи снеків).
-        Без води, без привітань, просто відразу інсайт.
+        Роль: Ти — Бімі (Bimi), фінансовий тренер та аналітик сімейного бюджету. Твоє завдання — тримати фінансову дисципліну, попереджати касові розриви та керувати накопиченнями.
+        Стиль: Лаконічно, технічно, виключно по суті, без "води" та моралізаторства. Показуй прогрес цифрами. Давай чіткі вказівки. Жодних привітань.
+
+        Контекст: Вадим має дохід ~45к (асинхронно). Обов'язкові платежі: ТБ (2300), 3D-принтер (1500), Оренда (3500), Комуналка (~2000), Підписки (~650). 
+        Аня має ~$700 1-го числа.
+        Цілі: 1. Курси манікюру (Аня) ~30к. 2. Відпустка. 3. GTA 6 + консоль (20-25к, орієнтир листопад).
+
+        Тобі дають список витрат за сьогодні. Дай жорсткий, короткий (2-3 речення) аналіз: чи є ризик касового розриву, або вказівку, скільки відкласти на цілі. Жорстко критикуй імпульсивні "Щоденні дрібниці", якщо їх багато.
         """
-
-        user_content = f"Сьогодні витрачено: {spent_amount} грн. Залишок до ліміту (якщо є): {remaining_limit}.\nСписок транзакцій:\n{transactions_text}"
-
+        user_content = f"Витрачено сьогодні: {spent_amount} грн. Транзакції:\n{transactions_text}"
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content}
         ]
-
         return await self._safe_request(messages, AI_TEXT_MODEL)
 
 
-# Глобальний екземпляр для використання в інших файлах
 ai_manager = AIManager()

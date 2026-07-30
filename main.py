@@ -7,6 +7,7 @@ import time
 import base64
 from datetime import datetime
 from functools import partial
+from tax_parser import fetch_tax_receipt
 
 import aiohttp
 from aiohttp import web
@@ -81,7 +82,9 @@ class TransferForm(StatesGroup): direction, amount, description = State(), State
 class MonoCommentForm(StatesGroup): text = State()
 
 
-class ReceiptForm(StatesGroup): confirm = State()
+class ReceiptForm(StatesGroup):
+    confirm = State()
+    ask_fn = State()
 
 
 # --- ДОПОМІЖНІ ФУНКЦІЇ ---
@@ -108,9 +111,7 @@ def main_kb(): return get_keyboard(["⚡️ Швидкі витрати", "💸 
 def quick_kb(): return get_keyboard(["☕️ Кава (60)", "⚡️ Енергетик (45)", "🚇 Метро (8)", "🔙 Назад"], row_width=2)
 
 
-def other_kb(): return get_keyboard(
-    ["📜 Історія", "💸 Переказ", "🇺🇸 Валюта", "📄 Архів звітів", "📉 Звіт (Тиждень)", "🍰 Діаграма", "🔔 Перевірити ліміти",
-     "⚙️ Змінити ліміт", "🧹 Розібрати 'Очікує'"], row_width=2, is_persistent=True, back_btn=True)
+def other_kb(): return get_keyboard(["📜 Історія", "💸 Переказ", "🇺🇸 Валюта", "📄 Архів звітів", "📉 Звіт (Тиждень)", "🍰 Діаграма", "🔔 Перевірити ліміти", "⚙️ Змінити ліміт", "🧹 Розібрати 'Очікує'", "🧾 Знайти чек у ДПС"], row_width=2, is_persistent=True, back_btn=True)
 
 
 def currency_kb(): return get_keyboard(["📥 Купив $", "📤 Продав $", "💰 Отримав $", "🛒 Витратив $"], row_width=2,
@@ -459,6 +460,50 @@ async def confirm_receipt_category(message: types.Message, state: FSMContext):
         await message.answer("❌ Помилка запису в таблицю.", reply_markup=main_kb())
     await state.clear()
 
+# ================= ПАРСЕР ПОДАТКОВОЇ =================
+@dp.message(F.text == "🧾 Знайти чек у ДПС", StateFilter("*"))
+async def ask_tax_receipt(message: types.Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(ReceiptForm.ask_fn)
+    await message.answer(
+        "🔢 <b>Введи Фіскальний Номер (ФН) чека:</b>\n<i>Він складається з цифр (наприклад: 4001070188). Або відправ мені посилання з ДПС.</i>",
+        parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+
+
+@dp.message(ReceiptForm.ask_fn)
+async def process_tax_receipt(message: types.Message, state: FSMContext):
+    fn_number = re.sub(r'\D', '', message.text)  # Беремо тільки цифри
+    if not fn_number:
+        return await message.answer("❌ Я не знайшов цифр у твоєму повідомленні.")
+
+    await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+    await message.answer("⏳ <i>Шукаю чек у базі Податкової... Це може зайняти пару секунд.</i>", parse_mode="HTML")
+
+    result = await fetch_tax_receipt(fn_number)
+
+    if not result:
+        return await message.answer(
+            "❌ Чек не знайдено! Можливо, каса ще не передала його в ДПС, або номер введено невірно.",
+            reply_markup=main_kb())
+
+    shop_name = result.get("shop_name")
+    total = result.get("total_amount")
+    items = result.get("items")
+
+    items_text = ", ".join(items)
+    if len(items_text) > 200: items_text = items_text[:197] + "..."
+    desc = f"{shop_name} ({items_text})"
+
+    await state.update_data(amount=total, description=desc, t_type="Витрати")
+    await state.set_state(ReceiptForm.confirm)
+
+    text = (f"🧾 <b>Чек знайдено в ДПС!</b>\n"
+            f"🏢 Магазин: <b>{shop_name}</b>\n"
+            f"💰 Сума: <b>{total:.2f} грн</b>\n"
+            f"🛒 Товари: <i>{items_text}</i>\n\n"
+            f"В яку категорію це записати?")
+
+    await message.answer(text, reply_markup=categories_kb(is_expense=True), parse_mode="HTML")
 
 # ================= СТАНДАРТНІ КОМАНДИ БОТА =================
 @dp.message(Command("start"))
