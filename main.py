@@ -5,10 +5,9 @@ import html
 import subprocess
 import time
 import base64
+import re
 from datetime import datetime
 from functools import partial
-from tax_parser import fetch_tax_receipt
-import re
 
 import aiohttp
 from aiohttp import web
@@ -30,7 +29,7 @@ import visuals
 from config import BOT_TOKEN, USERS, MONO_TOKENS, WEBHOOK_URL
 from gs_manager import GoogleSheetManager
 
-# Новий мікросервіс
+# Мікросервіс ШІ
 try:
     from ai_service import ai_manager
 except ImportError:
@@ -83,9 +82,7 @@ class TransferForm(StatesGroup): direction, amount, description = State(), State
 class MonoCommentForm(StatesGroup): text = State()
 
 
-class ReceiptForm(StatesGroup):
-    confirm = State()
-    ask_fn = State()
+class ReceiptForm(StatesGroup): confirm_cat = State()
 
 
 # --- ДОПОМІЖНІ ФУНКЦІЇ ---
@@ -112,7 +109,9 @@ def main_kb(): return get_keyboard(["⚡️ Швидкі витрати", "💸 
 def quick_kb(): return get_keyboard(["☕️ Кава (60)", "⚡️ Енергетик (45)", "🚇 Метро (8)", "🔙 Назад"], row_width=2)
 
 
-def other_kb(): return get_keyboard(["📜 Історія", "💸 Переказ", "🇺🇸 Валюта", "📄 Архів звітів", "📉 Звіт (Тиждень)", "🍰 Діаграма", "🔔 Перевірити ліміти", "⚙️ Змінити ліміт", "🧹 Розібрати 'Очікує'", "🧾 Знайти чек у ДПС"], row_width=2, is_persistent=True, back_btn=True)
+def other_kb(): return get_keyboard(
+    ["📜 Історія", "💸 Переказ", "🇺🇸 Валюта", "📄 Архів звітів", "📉 Звіт (Тиждень)", "🍰 Діаграма", "🔔 Перевірити ліміти",
+     "⚙️ Змінити ліміт", "🧹 Розібрати 'Очікує'"], row_width=2, is_persistent=True, back_btn=True)
 
 
 def currency_kb(): return get_keyboard(["📥 Купив $", "📤 Продав $", "💰 Отримав $", "🛒 Витратив $"], row_width=2,
@@ -145,8 +144,8 @@ def generate_mono_keyboard(mono_id, user_id):
     kb_rows.append([InlineKeyboardButton(text="📋 Всі категорії", callback_data=f"mall:{mono_id}")])
     user_name = USERS.get(user_id, "")
     partner = "Аня" if user_name == "Вадим" else "Вадим"
-    if user_name: kb_rows.append(
-        [InlineKeyboardButton(text=f"🔄 Це переказ для {partner}", callback_data=f"mtrn:{mono_id}")])
+    if user_name:
+        kb_rows.append([InlineKeyboardButton(text=f"🔄 Це переказ для {partner}", callback_data=f"mtrn:{mono_id}")])
     kb_rows.append([
         InlineKeyboardButton(text="⏳ На потім", callback_data=f"mltr:{mono_id}"),
         InlineKeyboardButton(text="❌ Стерти", callback_data=f"mdel:{mono_id}")
@@ -201,6 +200,7 @@ async def process_mono_webhook_background(data):
     if data.get("type") == "StatementItem":
         acc_id, statement = data["data"]["account"], data["data"]["statementItem"]
         mono_id = statement.get("id")
+
         if mono_id in PROCESSED_MONO_IDS: return
         PROCESSED_MONO_IDS.add(mono_id)
         if len(PROCESSED_MONO_IDS) > 5000: PROCESSED_MONO_IDS.clear()
@@ -385,10 +385,18 @@ async def mono_delete_tx(call: types.CallbackQuery):
         await call.message.edit_text("❌ Помилка видалення.")
 
 
-# ================= СМАРТ ЧЕКИ (ШІ) =================
+# ================= СМАРТ ЧЕКИ (ШІ + ПРИВ'ЯЗКА) =================
+def receipt_action_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Створити нову витрату", callback_data="rcpt_new")],
+        [InlineKeyboardButton(text="🔗 Прив'язати до 'Очікує' (Моно)", callback_data="rcpt_link")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="rcpt_cancel")]
+    ])
+
+
 @dp.message(F.photo, StateFilter("*"))
 async def handle_receipt_photo(message: types.Message, state: FSMContext):
-    """Обробка надісланого фото чеку через OpenRouter Vision."""
+    """Обробка фото чеку та пропозиція дій."""
     if not ai_manager:
         return await message.answer("🤖 Функції ШІ зараз вимкнені (ai_service не знайдено).")
 
@@ -397,114 +405,116 @@ async def handle_receipt_photo(message: types.Message, state: FSMContext):
                                parse_mode="HTML")
 
     try:
-        # Завантажуємо фото найкращої якості
         photo = message.photo[-1]
         file_info = await bot.get_file(photo.file_id)
         downloaded_file = await bot.download_file(file_info.file_path)
         base64_image = base64.b64encode(downloaded_file.read()).decode('utf-8')
 
-        # Відправляємо в ШІ
         result = await ai_manager.parse_receipt_image(base64_image)
-
         if not result:
-            return await msg.edit_text(
-                "❌ ШІ не зміг розпізнати цей чек або сервери OpenRouter перевантажені. Спробуй ще раз пізніше або введи вручну.")
+            return await msg.edit_text("❌ ШІ не зміг розпізнати цей чек. Спробуй краще фото або введи вручну.")
 
         shop_name = result.get("shop_name", "Невідомий магазин")
         total = result.get("total_amount", 0.0)
         items = result.get("items", [])
 
         items_text = ", ".join(items)
-        if len(items_text) > 100: items_text = items_text[:97] + "..."
+        if len(items_text) > 150: items_text = items_text[:147] + "..."
         desc = f"{shop_name} ({items_text})"
 
-        # Зберігаємо дані в FSM для підтвердження
-        await state.update_data(
-            amount=total,
-            description=desc,
-            t_type="Витрати"
-        )
-        await state.set_state(ReceiptForm.confirm)
+        # Зберігаємо розпізнані дані
+        await state.update_data(amount=total, description=desc, t_type="Витрати")
 
         text = (f"🧾 <b>Чек розпізнано!</b>\n"
                 f"🏢 Магазин: <b>{shop_name}</b>\n"
                 f"💰 Сума: <b>{total} грн</b>\n"
                 f"🛒 Товари: <i>{items_text}</i>\n\n"
-                f"В яку категорію це записати?")
+                f"Що робимо з цим чеком?")
 
         await msg.delete()
-        await message.answer(text, reply_markup=categories_kb(is_expense=True), parse_mode="HTML")
+        await message.answer(text, reply_markup=receipt_action_kb(), parse_mode="HTML")
 
     except Exception as e:
-        await msg.edit_text(f"❌ Виникла критична помилка під час обробки фото: {e}")
+        await msg.edit_text(f"❌ Критична помилка фото: {e}")
 
 
-@dp.message(ReceiptForm.confirm)
+@dp.callback_query(F.data == "rcpt_new")
+async def receipt_new_tx(call: types.CallbackQuery, state: FSMContext):
+    """Шлях 1: Створення повністю нової транзакції з чека."""
+    await call.message.edit_text(f"{call.message.text}\n\n<i>Обери категорію для нової витрати:</i>",
+                                 reply_markup=categories_kb(is_expense=True), parse_mode="HTML")
+    await state.set_state(ReceiptForm.confirm_cat)
+
+
+@dp.message(ReceiptForm.confirm_cat)
 async def confirm_receipt_category(message: types.Message, state: FSMContext):
-    """Збереження розпізнаного чеку після вибору категорії."""
     data = await state.get_data()
     category = message.text
-    amount = data.get("amount")
-    desc = data.get("description")
-    t_type = data.get("t_type")
+    amount, desc, t_type = data.get("amount"), data.get("description"), data.get("t_type")
     who = USERS.get(message.from_user.id, "Unknown")
 
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-
-    success = await run_sync(gs.add_transaction, datetime.now().strftime("%d.%m.%Y"), category, amount, t_type, desc,
-                             "AI_Receipt", who)
-
-    if success:
-        await message.answer(f"✅ Чек збережено: <b>{amount} грн</b> ({category})", reply_markup=main_kb(),
-                             parse_mode="HTML")
+    if await run_sync(gs.add_transaction, datetime.now().strftime("%d.%m.%Y"), category, amount, t_type, desc,
+                      "AI_Receipt", who):
+        await message.answer(f"✅ Чек збережено як нову витрату: <b>{amount} грн</b> ({category})",
+                             reply_markup=main_kb(), parse_mode="HTML")
     else:
         await message.answer("❌ Помилка запису в таблицю.", reply_markup=main_kb())
     await state.clear()
 
-# ================= ПАРСЕР ПОДАТКОВОЇ =================
-@dp.message(F.text == "🧾 Знайти чек у ДПС", StateFilter("*"))
-async def ask_tax_receipt(message: types.Message, state: FSMContext):
+
+@dp.callback_query(F.data == "rcpt_link")
+async def receipt_link_tx(call: types.CallbackQuery):
+    """Шлях 2: Показ списку нерозібраних транзакцій для прив'язки."""
+    user_name = USERS.get(call.from_user.id)
+    unresolved_all = await run_sync(gs.get_unresolved_transactions)
+    user_unresolved = [tx for tx in unresolved_all if tx["who"] == user_name]
+
+    if not user_unresolved:
+        return await call.message.edit_text(
+            "🤷‍♂️ У тебе зараз немає нерозібраних витрат з Монобанку.\nНатисни 'Створити нову' або скасуй.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="➕ Створити нову", callback_data="rcpt_new")],
+                                 [InlineKeyboardButton(text="❌ Скасувати", callback_data="rcpt_cancel")]]))
+
+    kb_rows = []
+    # Показуємо останні 5 нерозібраних транзакцій
+    for tx in user_unresolved[:5]:
+        btn_text = f"{tx['amount']} грн | {tx['desc'][:20]}"
+        kb_rows.append([InlineKeyboardButton(text=btn_text, callback_data=f"rlnk:{tx['mono_id']}")])
+
+    kb_rows.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="rcpt_cancel")])
+    await call.message.edit_text(
+        f"{call.message.text}\n\n🔗 <b>Обери витрату Монобанку, до якої прив'язати цей чек:</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows), parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("rlnk:"))
+async def receipt_do_link(call: types.CallbackQuery, state: FSMContext):
+    """Шлях 2: Фактична прив'язка чека до обраної транзакції."""
+    mono_id = call.data.split(":")[1]
+    data = await state.get_data()
+    desc = data.get("description", "Чек")
+
+    await bot.send_chat_action(call.message.chat.id, ChatAction.TYPING)
+
+    # Дописуємо товари з чека в коментар Моно-транзакції
+    success = await run_sync(gs.append_desc_by_mono_id, f"mono_{mono_id}", f"🧾 {desc}")
+
+    if success:
+        await call.message.edit_text(
+            "✅ <b>Чек успішно прив'язано до транзакції!</b>\nТовари додано в опис. Тепер ти можеш розібрати її через 'Розібрати Очікує'.",
+            parse_mode="HTML")
+    else:
+        await call.message.edit_text("❌ Помилка прив'язки.")
     await state.clear()
-    await state.set_state(ReceiptForm.ask_fn)
-    await message.answer(
-        "🔢 <b>Введи Фіскальний Номер (ФН) чека:</b>\n<i>Він складається з цифр (наприклад: 4001070188). Або відправ мені посилання з ДПС.</i>",
-        parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
 
 
-@dp.message(ReceiptForm.ask_fn)
-async def process_tax_receipt(message: types.Message, state: FSMContext):
-    fn_number = re.sub(r'\D', '', message.text)  # Беремо тільки цифри
-    if not fn_number:
-        return await message.answer("❌ Я не знайшов цифр у твоєму повідомленні.")
+@dp.callback_query(F.data == "rcpt_cancel")
+async def receipt_cancel(call: types.CallbackQuery, state: FSMContext):
+    await call.message.edit_text("❌ Роботу з чеком скасовано.")
+    await state.clear()
 
-    await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-    await message.answer("⏳ <i>Шукаю чек у базі Податкової... Це може зайняти пару секунд.</i>", parse_mode="HTML")
-
-    result = await fetch_tax_receipt(fn_number)
-
-    if not result:
-        return await message.answer(
-            "❌ Чек не знайдено! Можливо, каса ще не передала його в ДПС, або номер введено невірно.",
-            reply_markup=main_kb())
-
-    shop_name = result.get("shop_name")
-    total = result.get("total_amount")
-    items = result.get("items")
-
-    items_text = ", ".join(items)
-    if len(items_text) > 200: items_text = items_text[:197] + "..."
-    desc = f"{shop_name} ({items_text})"
-
-    await state.update_data(amount=total, description=desc, t_type="Витрати")
-    await state.set_state(ReceiptForm.confirm)
-
-    text = (f"🧾 <b>Чек знайдено в ДПС!</b>\n"
-            f"🏢 Магазин: <b>{shop_name}</b>\n"
-            f"💰 Сума: <b>{total:.2f} грн</b>\n"
-            f"🛒 Товари: <i>{items_text}</i>\n\n"
-            f"В яку категорію це записати?")
-
-    await message.answer(text, reply_markup=categories_kb(is_expense=True), parse_mode="HTML")
 
 # ================= СТАНДАРТНІ КОМАНДИ БОТА =================
 @dp.message(Command("start"))
@@ -550,7 +560,6 @@ async def cmd_update(message: types.Message):
         sys.exit(0)
 
 
-# ================= ЗАГАЛЬНА ЛОГІКА ВВОДУ ЧИСЕЛ =================
 async def validate_amount(message: types.Message, state: FSMContext, next_state: State, data_key: str, next_text: str):
     try:
         val = float(message.text.replace(',', '.'))
@@ -561,7 +570,6 @@ async def validate_amount(message: types.Message, state: FSMContext, next_state:
         await message.answer("🔢 Будь ласка, введи число (можна з комою).")
 
 
-# ================= ВИТРАТИ / ДОХОДИ =================
 @dp.message(F.text.in_({"💸 Витрата (Детально)", "💰 Дохід"}), StateFilter("*"))
 async def full_start(message: types.Message, state: FSMContext):
     await state.clear()
@@ -623,7 +631,6 @@ async def full_save(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-# ================= ШВИДКІ ВИТРАТИ (ПІДМЕНЮ) =================
 @dp.message(F.text == "⚡️ Швидкі витрати")
 async def quick_menu(message: types.Message):
     await message.answer("Обери швидку витрату:", reply_markup=quick_kb())
@@ -687,7 +694,6 @@ async def qa_edit_finish(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-# ================= ПЕРЕКАЗИ =================
 @dp.message(F.text == "💸 Переказ", StateFilter("*"))
 async def transfer_start(message: types.Message, state: FSMContext):
     await state.clear()
@@ -741,7 +747,6 @@ async def transfer_save(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-# ================= ІСТОРІЯ (Pagination + Delete Confirm) =================
 @dp.message(F.text == "📜 Історія", StateFilter("*"))
 async def show_history(message: types.Message, state: FSMContext):
     await state.clear()
@@ -830,7 +835,6 @@ async def perform_delete(callback: CallbackQuery):
         await render_history(callback.message, page=int(page), is_edit=True)
 
 
-# ================= АРХІВ ЗВІТІВ =================
 @dp.message(F.text == "📄 Архів звітів", StateFilter("*"))
 async def report_start(message: types.Message, state: FSMContext):
     await state.clear()
@@ -894,7 +898,6 @@ async def report_month(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-# ================= ВАЛЮТА =================
 @dp.message(F.text == "🇺🇸 Валюта", StateFilter("*"))
 async def curr_menu(message: types.Message, state: FSMContext):
     await state.clear()
@@ -949,7 +952,6 @@ async def curr_save(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-# ================= СТАТИСТИКА / ЛІМІТИ / ДІАГРАМИ =================
 @dp.message(F.text == "📊 Статистика", StateFilter("*"))
 async def show_stats(message: types.Message, state: FSMContext):
     await state.clear()
@@ -1029,7 +1031,6 @@ async def check_limits(message: types.Message, state: FSMContext):
     await message.answer(text, parse_mode="HTML")
 
 
-# --- ЗМІНА ЛІМІТУ ---
 @dp.message(F.text == "⚙️ Змінити ліміт", StateFilter("*"))
 async def edit_limit_start(message: types.Message, state: FSMContext):
     await state.clear()
@@ -1059,7 +1060,6 @@ async def edit_limit_save(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-# ================= ФОНОВІ ЗАВДАННЯ =================
 async def check_daily_reminders():
     reminders = await run_sync(gs.get_due_reminders)
     if not reminders: return
@@ -1113,7 +1113,6 @@ async def evening_summary_broadcast():
     text = "📰 <b>Вечірні новини BimiPal</b>\n➖➖➖➖➖➖\n"
     text += f"💸 За сьогодні витрачено: <b>{spent:,.0f} грн</b>\n"
 
-    # Виклик Модуля Б (Аналітика ШІ)
     if ai_manager:
         transactions_text = await run_sync(gs.get_today_transactions_text)
         insight = await ai_manager.generate_daily_insight(spent, "Невідомо (поки що)", transactions_text)
@@ -1137,14 +1136,12 @@ async def evening_summary_broadcast():
             pass
 
 
-# ================= STARTUP =================
 async def on_startup():
     print("🚀 Запуск Телеграм-бота...")
     exp, inc = await run_sync(gs.get_categories)
     CACHE["expense_cats"] = exp
     CACHE["income_cats"] = inc
 
-    # Запуск автопілота Mono
     asyncio.create_task(setup_monobank())
 
     scheduler.add_job(check_daily_reminders, 'cron', hour=9, minute=0)
@@ -1154,14 +1151,12 @@ async def on_startup():
 
 
 async def start_web_server():
-    """Запускає веб-сервер для прослуховування вебхуків Монобанку."""
     app = web.Application()
     app.router.add_get('/webhook', mono_webhook_get)
     app.router.add_post('/webhook', mono_webhook_post)
 
     runner = web.AppRunner(app)
     await runner.setup()
-    # 0.0.0.0 означає, що сервер приймає підключення звідусіль (через Cloudflare)
     site = web.TCPSite(runner, '0.0.0.0', 18080)
     await site.start()
     print("🌐 Web-сервер Монобанку запущено на порту 18080!")
@@ -1169,11 +1164,7 @@ async def start_web_server():
 
 async def main():
     dp.startup.register(on_startup)
-
-    # 1. Запускаємо веб-сервер у фоні
     await start_web_server()
-
-    # 2. Запускаємо бота
     await dp.start_polling(bot)
 
 
