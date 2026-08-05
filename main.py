@@ -28,6 +28,7 @@ import reports
 import visuals
 from config import BOT_TOKEN, USERS, MONO_TOKENS, WEBHOOK_URL
 from gs_manager import GoogleSheetManager
+from api_client import api_client  # <--- ПІДКЛЮЧЕНО API КЛІЄНТ
 
 try:
     from ai_service import ai_manager
@@ -210,6 +211,12 @@ async def process_mono_webhook_background(data):
         user_id = MONO_ACCOUNT_TO_USER.get(acc_id)
         if user_id and amount < 0:
             real_amount, date_now, who = abs(amount), datetime.now().strftime("%d.%m.%Y"), USERS.get(user_id, "Unknown")
+
+            # Тіньовий запис "Очікує" в БД
+            asyncio.create_task(
+                api_client.shadow_add_transaction("❓ Очікує", real_amount, "Витрати", desc, f"mono_{mono_id}", who,
+                                                  "Монобанк", mono_id))
+
             if await run_sync(gs.add_transaction, date_now, "❓ Очікує", real_amount, "Витрати", desc, f"mono_{mono_id}",
                               who):
                 try:
@@ -442,6 +449,9 @@ async def confirm_receipt_category(message: types.Message, state: FSMContext):
     who = USERS.get(message.from_user.id, "Unknown")
 
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+
+    asyncio.create_task(api_client.shadow_add_transaction(category, amount, t_type, desc, "AI_Receipt", who))
+
     if await run_sync(gs.add_transaction, datetime.now().strftime("%d.%m.%Y"), category, amount, t_type, desc,
                       "AI_Receipt", who):
         await message.answer(f"✅ Чек збережено як нову витрату: <b>{amount} грн</b> ({category})",
@@ -540,14 +550,10 @@ async def cmd_update(message: types.Message):
         sys.exit(0)
 
 
-# Місток для майбутнього Mini App (React + FastAPI)
 @dp.message(Command("app"))
 async def cmd_app(message: types.Message):
     if message.from_user.id not in USERS: return
-
-    # ⚠️ ТУТ ЗАМІНИ URL НА АДРЕСУ СВОГО REACT ДОДАТКУ (коли налаштуєш Cloudflare Tunnel)
     MINI_APP_URL = "https://your-tunnel.trycloudflare.com"
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📱 Відкрити BimiApp", web_app=WebAppInfo(url=MINI_APP_URL))]
     ])
@@ -619,6 +625,11 @@ async def full_save(message: types.Message, state: FSMContext):
     data = await state.get_data()
     who = USERS.get(message.from_user.id, "Unknown")
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+
+    # Тіньовий запис у PostgreSQL
+    asyncio.create_task(
+        api_client.shadow_add_transaction(data['category'], data['amount'], data['t_type'], message.text, "Bot", who))
+
     await run_sync(gs.add_transaction, datetime.now().strftime("%d.%m.%Y"), data['category'], data['amount'],
                    data['t_type'], message.text, "Bot", who)
 
@@ -713,6 +724,10 @@ async def topup_jar_amount(message: types.Message, state: FSMContext):
 
         res1 = await run_sync(gs.add_to_jar, data['jar_name'], amount)
         date_now = datetime.now().strftime("%d.%m.%Y")
+
+        asyncio.create_task(api_client.shadow_add_transaction("🏦 Накопичення", amount, "Витрати",
+                                                              f"Поповнення банки: {data['jar_name']}", "Jar-Auto", who))
+
         res2 = await run_sync(gs.add_transaction, date_now, f"🏦 Накопичення", amount, "Витрати",
                               f"Поповнення банки: {data['jar_name']}", "Jar-Auto", who)
 
