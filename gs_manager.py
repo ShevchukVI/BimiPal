@@ -6,6 +6,7 @@ import re
 import time
 from config import SPREADSHEET_ID, SHEET_NAME
 
+
 class GoogleSheetManager:
     def __init__(self):
         self.scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -26,7 +27,7 @@ class GoogleSheetManager:
         now = time.time()
         if self._cached_data is not None and (now - self._cache_time < 60):
             return self._cached_data
-        
+
         try:
             sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
             self._cached_data = sheet.get_all_values()
@@ -181,7 +182,7 @@ class GoogleSheetManager:
                     t_type = row[3].strip()
                     cat = row[1].strip()
                     who = row[6].strip() if len(row) > 6 else ""
-                    
+
                     clean_date = re.sub(r'[^\d.]', '', row[0].strip())
                     t_date = datetime.strptime(clean_date, "%d.%m.%Y")
 
@@ -235,18 +236,18 @@ class GoogleSheetManager:
             all_values = self._get_all_rows_cached()
             if not all_values or len(all_values) <= 2: return None
             data_rows = all_values[2:]
-            
+
             now = datetime.now()
             income = 0.0
             expense = 0.0
             categories = {}
-            
+
             for row in data_rows:
                 if not row or len(row) < 4 or not row[0]: continue
                 try:
                     clean_date = re.sub(r'[^\d.]', '', row[0].strip())
                     t_date = datetime.strptime(clean_date, "%d.%m.%Y")
-                    
+
                     if 0 <= (now - t_date).days <= 7:
                         amount = self._clean_amount(row[2])
                         t_type = row[3].strip()
@@ -274,34 +275,69 @@ class GoogleSheetManager:
 
             data_rows = all_values[2:]
             today_str = datetime.now().strftime("%d.%m.%Y")
-            
+
             spent_today = 0.0
             unresolved_count = 0
-            
+
             for row in data_rows:
                 if not row or len(row) < 4 or not row[0]: continue
                 row_date = row[0].strip()
                 if today_str not in row_date: continue
-                
+
                 cat = row[1].strip()
                 t_type = row[3].strip()
-                try: amount = self._clean_amount(row[2])
-                except: amount = 0.0
-                
+                try:
+                    amount = self._clean_amount(row[2])
+                except:
+                    amount = 0.0
+
                 is_income = t_type in ["Поповнення", "Дохід", "Доходи"] or "Доход" in cat or "Поповнення" in cat
-                
+
                 if cat == "🔄 Переказ":
-                    pass 
+                    pass
                 elif cat == "❓ Очікує":
                     unresolved_count += 1
                     spent_today += amount
                 elif not is_income:
                     spent_today += amount
-                    
+
             return {"spent": spent_today, "unresolved": unresolved_count}
         except Exception as e:
             print(f"🔴 Error daily summary: {e}")
             return {"spent": 0.0, "unresolved": 0}
+
+    def get_today_transactions_text(self):
+        """Збирає всі витрати за сьогоднішній день для AI інсайту."""
+        try:
+            all_values = self._get_all_rows_cached()
+            if not all_values or len(all_values) <= 2:
+                return ""
+
+            data_rows = all_values[2:]
+            today_str = datetime.now().strftime("%d.%m.%Y")
+            txs = []
+
+            for row in data_rows:
+                if not row or len(row) < 4 or not row[0]: continue
+                if today_str in row[0].strip():
+                    cat = row[1].strip()
+                    try:
+                        amount = self._clean_amount(row[2])
+                    except:
+                        amount = 0.0
+                    t_type = row[3].strip()
+                    desc = row[4].strip() if len(row) > 4 else ""
+
+                    is_income = t_type in ["Поповнення", "Дохід", "Доходи"]
+
+                    # Передаємо тільки реальні витрати (не доходи і не нерозібрані)
+                    if not is_income and cat != "❓ Очікує" and cat != "🔄 Переказ":
+                        txs.append(f"- {cat}: {amount} грн ({desc})")
+
+            return "\n".join(txs)
+        except Exception as e:
+            print(f"🔴 Error getting today transactions text: {e}")
+            return ""
 
     # --- REPORTS (PDF) ---
     def get_month_history(self, month, year):
@@ -319,7 +355,7 @@ class GoogleSheetManager:
                 try:
                     clean_date = re.sub(r'[^\d.]', '', row[0].strip())
                     t_date = datetime.strptime(clean_date, "%d.%m.%Y")
-                    
+
                     if t_date.month == month and t_date.year == year:
                         amount = self._clean_amount(row[2])
                         t_type = row[3].strip()
@@ -386,6 +422,60 @@ class GoogleSheetManager:
             return total
         except:
             return 0.0
+
+    # --- JARS (СКАРБНИЧКИ) ---
+    def _ensure_jars_sheet(self):
+        try:
+            ss = self.client.open_by_key(SPREADSHEET_ID)
+            try:
+                sheet = ss.worksheet("Скарбнички")
+            except gspread.exceptions.WorksheetNotFound:
+                sheet = ss.add_worksheet(title="Скарбнички", rows="100", cols="3")
+                sheet.append_row(["Назва", "Баланс", "Ціль"])
+            return sheet
+        except Exception as e:
+            print(f"🔴 Error ensuring Jars sheet: {e}")
+            return None
+
+    def get_jars(self):
+        try:
+            sheet = self._ensure_jars_sheet()
+            if not sheet: return []
+            data = sheet.get_all_values()
+            jars = []
+            for row in data[1:]:
+                if row and row[0]:
+                    bal = self._clean_amount(row[1]) if len(row) > 1 else 0.0
+                    goal = self._clean_amount(row[2]) if len(row) > 2 else 0.0
+                    jars.append({"name": row[0], "balance": bal, "goal": goal})
+            return jars
+        except Exception as e:
+            print(f"🔴 Error getting jars: {e}")
+            return []
+
+    def create_jar(self, name, goal):
+        try:
+            sheet = self._ensure_jars_sheet()
+            if not sheet: return False
+            sheet.append_row([name, 0.0, goal])
+            return True
+        except Exception as e:
+            print(f"🔴 Error creating jar: {e}")
+            return False
+
+    def add_to_jar(self, name, amount):
+        try:
+            sheet = self._ensure_jars_sheet()
+            if not sheet: return False
+            cell = sheet.find(name)
+            if cell:
+                current_bal = self._clean_amount(sheet.cell(cell.row, 2).value)
+                sheet.update_cell(cell.row, 2, current_bal + amount)
+                return True
+            return False
+        except Exception as e:
+            print(f"🔴 Error adding to jar: {e}")
+            return False
 
     # --- LIMITS ---
     def get_budget_limits(self):
@@ -529,21 +619,19 @@ class GoogleSheetManager:
             return False
 
     def get_unresolved_transactions(self):
-        """Повертає список всіх транзакцій зі статусом 'Очікує'."""
         try:
             all_values = self._get_all_rows_cached()
             if not all_values or len(all_values) <= 2:
                 return []
-            
+
             data_rows = all_values[2:]
             unresolved = []
-            
+
             for row in data_rows:
                 if len(row) >= 6 and row[1].strip() == "❓ Очікує":
-                    # Шукаємо mono_id у примітці (стовпець F)
                     note_field = row[5]
                     mono_id = note_field.replace("mono_", "").strip() if "mono_" in note_field else ""
-                    
+
                     if mono_id:
                         unresolved.append({
                             "mono_id": mono_id,
