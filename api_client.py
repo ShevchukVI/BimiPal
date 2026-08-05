@@ -8,47 +8,53 @@ logger = logging.getLogger(__name__)
 class BimiAPIClient:
     def __init__(self, base_url="https://bimif.vshevchuk.pp.ua"):
         self.base_url = base_url
-        self._cache = {
-            "family_id": None,
-            "users": {},
-            "cats": {}
-        }
+        self._cache = {"family_id": None, "users": {}, "cats": {}}
 
     async def _get(self, endpoint):
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{self.base_url}{endpoint}", timeout=3) as resp:
-                    if resp.status == 200:
-                        return await resp.json()
+                    if resp.status == 200: return await resp.json()
         except Exception:
             pass
         return None
 
-    async def _post(self, endpoint, payload):
+    async def _post(self, endpoint, payload, method="post"):
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(f"{self.base_url}{endpoint}", json=payload, timeout=3) as resp:
-                    if resp.status in (200, 201):
-                        return await resp.json()
+                req = session.post if method == "post" else session.put
+                async with req(f"{self.base_url}{endpoint}", json=payload, timeout=3) as resp:
+                    if resp.status in (200, 201): return await resp.json()
         except Exception:
             pass
         return None
 
-    # --- SaaS МЕТОДИ ---
-    async def check_user_registered(self, tg_id: int):
-        """Перевіряє, чи зареєстрований користувач у SaaS базі"""
-        user = await self._get(f"/users/by-tg/{tg_id}")
-        return user is not None
+    # --- SAAS МЕТОДИ ---
+    async def get_user_info(self, tg_id: int):
+        return await self._get(f"/auth/me?tg_id={tg_id}")
 
     async def register_saas_user(self, tg_id: int, name: str, family_name: str, mono_token: str = None):
-        """Створює нову сім'ю та користувача для SaaS"""
         new_f = await self._post("/families", {"name": family_name, "mono_token": mono_token})
         if new_f:
             await self._post("/users", {"family_id": new_f["id"], "name": name, "tg_id": tg_id})
-            return True
+            return new_f["invite_code"]  # Повертаємо БЕЗПЕЧНИЙ код, а не ID
+        return None
+
+    async def get_family_by_invite(self, invite_code: str):
+        return await self._get(f"/families/by-invite/{invite_code}")
+
+    async def join_family(self, tg_id: int, name: str, family_id: int):
+        res = await self._post("/users", {"family_id": family_id, "name": name, "tg_id": tg_id})
+        return res is not None
+
+    async def update_mono_token(self, tg_id: int, new_token: str):
+        user_info = await self.get_user_info(tg_id)
+        if user_info and "family_id" in user_info:
+            res = await self._post(f"/families/{user_info['family_id']}/token", {"mono_token": new_token}, method="put")
+            return res is not None
         return False
 
-    # --- LEGACY SHADOW WRITE МЕТОДИ (Для Вадима та Ані) ---
+    # --- LEGACY SHADOW WRITE МЕТОДИ ---
     async def get_or_create_family(self, name="Шевчуки"):
         if self._cache["family_id"]: return self._cache["family_id"]
         fams = await self._get("/families")

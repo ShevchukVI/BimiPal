@@ -14,7 +14,7 @@ from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ChatAction
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -28,7 +28,7 @@ import reports
 import visuals
 from config import BOT_TOKEN, USERS, MONO_TOKENS, WEBHOOK_URL
 from gs_manager import GoogleSheetManager
-from api_client import api_client  # <--- ПІДКЛЮЧЕНО API КЛІЄНТ
+from api_client import api_client
 
 try:
     from ai_service import ai_manager
@@ -36,28 +36,18 @@ except ImportError:
     ai_manager = None
     logging.warning("AI_SERVICE не підключено. Бот працюватиме без AI-фіч.")
 
-# --- НАЛАШТУВАННЯ ---
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 gs = GoogleSheetManager()
 scheduler = AsyncIOScheduler()
 
-CACHE = {
-    "expense_cats": [],
-    "income_cats": [],
-    "pending_reminders": {}
-}
-
+CACHE = {"expense_cats": [], "income_cats": [], "pending_reminders": {}}
 MONO_ACCOUNT_TO_USER = {}
-MONO_BALANCES_CACHE = {
-    "Вадим": {"time": 0, "balance": 0.0},
-    "Аня": {"time": 0, "balance": 0.0}
-}
+MONO_BALANCES_CACHE = {"Вадим": {"time": 0, "balance": 0.0}, "Аня": {"time": 0, "balance": 0.0}}
 PROCESSED_MONO_IDS = set()
 
 
-# --- СТАНИ (FSM) ---
 class FinanceForm(StatesGroup):
     category, amount, description = State(), State(), State()
     edit_limit_cat, edit_limit_amount = State(), State()
@@ -88,13 +78,15 @@ class JarForm(StatesGroup):
     select_jar, add_amount = State(), State()
 
 
-# Стан для реєстрації нових користувачів (SaaS)
 class SaaSOnboarding(StatesGroup):
     family_name = State()
     mono_token = State()
 
 
-# --- ДОПОМІЖНІ ФУНКЦІЇ ---
+class SaaSSettings(StatesGroup):
+    wait_for_token = State()
+
+
 async def run_sync(func, *args, **kwargs):
     return await asyncio.get_running_loop().run_in_executor(None, partial(func, *args, **kwargs))
 
@@ -111,28 +103,25 @@ def get_keyboard(items, row_width=2, is_persistent=True, back_btn=False):
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True, is_persistent=is_persistent)
 
 
-def main_kb():
-    return get_keyboard(["💸 Витрата (Готівка)", "💰 Дохід", "🏦 Скарбнички", "📊 Статистика", "📂 Інше"], row_width=2)
+def main_kb(): return get_keyboard(["💸 Витрата (Готівка)", "💰 Дохід", "🏦 Скарбнички", "📊 Статистика", "📂 Інше"],
+                                   row_width=2)
 
 
-def other_kb():
-    return get_keyboard(["📜 Історія", "💸 Переказ", "🇺🇸 Валюта", "📄 Архів звітів", "📉 Звіт (Тиждень)", "🍰 Діаграма",
-                         "🔔 Перевірити ліміти", "⚙️ Змінити ліміт", "🧹 Розібрати 'Очікує'"], row_width=2,
-                        is_persistent=True, back_btn=True)
+def other_kb(): return get_keyboard(
+    ["📜 Історія", "💸 Переказ", "🇺🇸 Валюта", "📄 Архів звітів", "📉 Звіт (Тиждень)", "🍰 Діаграма", "🔔 Перевірити ліміти",
+     "⚙️ Змінити ліміт", "🧹 Розібрати 'Очікує'"], row_width=2, is_persistent=True, back_btn=True)
 
 
-def currency_kb():
-    return get_keyboard(["📥 Купив $", "📤 Продав $", "💰 Отримав $", "🛒 Витратив $"], row_width=2, is_persistent=True,
-                        back_btn=True)
+def currency_kb(): return get_keyboard(["📥 Купив $", "📤 Продав $", "💰 Отримав $", "🛒 Витратив $"], row_width=2,
+                                       is_persistent=True, back_btn=True)
 
 
-def categories_kb(is_expense=True):
-    return get_keyboard(CACHE["expense_cats"] if is_expense else CACHE["income_cats"], back_btn=True) if CACHE.get(
-        "expense_cats") else get_keyboard([], back_btn=True)
+def categories_kb(is_expense=True): return get_keyboard(CACHE["expense_cats"] if is_expense else CACHE["income_cats"],
+                                                        back_btn=True) if CACHE.get("expense_cats") else get_keyboard(
+    [], back_btn=True)
 
 
-def limits_edit_kb():
-    return get_keyboard(CACHE.get("expense_cats", []), back_btn=True)
+def limits_edit_kb(): return get_keyboard(CACHE.get("expense_cats", []), back_btn=True)
 
 
 def generate_mono_keyboard(mono_id, user_id):
@@ -144,7 +133,6 @@ def generate_mono_keyboard(mono_id, user_id):
             kb_rows.append(row)
             row = []
     if row: kb_rows.append(row)
-
     kb_rows.append([InlineKeyboardButton(text="📋 Всі категорії", callback_data=f"mall:{mono_id}")])
     user_name = USERS.get(user_id, "")
     partner = "Аня" if user_name == "Вадим" else "Вадим"
@@ -158,10 +146,13 @@ def generate_mono_keyboard(mono_id, user_id):
 
 
 def saas_kb():
-    MINI_APP_URL = "https://bimiapp.vshevchuk.pp.ua"
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Відкрити BimiApp", web_app=WebAppInfo(url=MINI_APP_URL))]
-    ])
+    # Гібридний підхід: Даємо SaaS-користувачам ті самі стандартні кнопки
+    kb = [
+        [KeyboardButton(text="💸 Витрата (Готівка)"), KeyboardButton(text="💰 Дохід")],
+        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="📂 Інше")],
+        [KeyboardButton(text="📱 Відкрити BimiApp (Web)")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 
 # ================= МОНОБАНК: ВЕБ-СЕРВЕР ТА АПІ =================
@@ -224,8 +215,6 @@ async def process_mono_webhook_background(data):
         user_id = MONO_ACCOUNT_TO_USER.get(acc_id)
         if user_id and amount < 0:
             real_amount, date_now, who = abs(amount), datetime.now().strftime("%d.%m.%Y"), USERS.get(user_id, "Unknown")
-
-            # Тіньовий запис "Очікує" в БД
             asyncio.create_task(
                 api_client.shadow_add_transaction("❓ Очікує", real_amount, "Витрати", desc, f"mono_{mono_id}", who,
                                                   "Монобанк", mono_id))
@@ -413,32 +402,25 @@ def receipt_action_kb():
 @dp.message(F.photo, StateFilter("*"))
 async def handle_receipt_photo(message: types.Message, state: FSMContext):
     if not ai_manager: return await message.answer("🤖 Функції ШІ зараз вимкнені.")
-
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     msg = await message.answer("🔍 <i>Штучний інтелект аналізує чек... Це може зайняти 10-25 секунд.</i>",
                                parse_mode="HTML")
-
     try:
         photo = message.photo[-1]
         file_info = await bot.get_file(photo.file_id)
         downloaded_file = await bot.download_file(file_info.file_path)
         base64_image = base64.b64encode(downloaded_file.read()).decode('utf-8')
-
         result = await ai_manager.parse_receipt_image(base64_image)
-
-        if not result:
-            return await msg.edit_text("❌ ШІ не зміг розпізнати цей чек. Спробуй ще раз пізніше.")
+        if not result: return await msg.edit_text("❌ ШІ не зміг розпізнати цей чек. Спробуй ще раз пізніше.")
 
         shop_name = result.get("shop_name", "Невідомий магазин")
         total = result.get("total_amount", 0.0)
         items = result.get("items", [])
-
         items_text = ", ".join(items)
         desc = f"{shop_name} ({items_text})"
         if len(desc) > 800: desc = desc[:797] + "..."
 
         await state.update_data(amount=total, description=desc, t_type="Витрати")
-
         text = (
             f"🧾 <b>Чек розпізнано!</b>\n🏢 Магазин: <b>{shop_name}</b>\n💰 Сума: <b>{total} грн</b>\n🛒 Товари: <i>{items_text}</i>\n\nЩо робимо з цим чеком?")
         await msg.delete()
@@ -462,7 +444,6 @@ async def confirm_receipt_category(message: types.Message, state: FSMContext):
     who = USERS.get(message.from_user.id, "Unknown")
 
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-
     asyncio.create_task(api_client.shadow_add_transaction(category, amount, t_type, desc, "AI_Receipt", who))
 
     if await run_sync(gs.add_transaction, datetime.now().strftime("%d.%m.%Y"), category, amount, t_type, desc,
@@ -520,21 +501,39 @@ async def receipt_cancel(call: types.CallbackQuery, state: FSMContext):
 
 
 # ================= СТАНДАРТНІ КОМАНДИ БОТА ТА SAAS ONBOARDING =================
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext):
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message, state: FSMContext, command: Command):
     await state.clear()
     user_id = message.from_user.id
 
-    # ЛОГІКА 1: LEGACY (Вадим та Аня)
+    # 1. ОБРОБКА ІНВАЙТ-ПОСИЛАННЯ (Deep Linking)
+    args = command.args
+    if args and args.startswith("join_"):
+        invite_code = args.split("_")[1]
+
+        existing_user = await api_client.get_user_info(user_id)
+        if existing_user:
+            return await message.answer("Ти вже зареєстрований в системі!", reply_markup=saas_kb())
+
+        family = await api_client.get_family_by_invite(invite_code)
+        if family:
+            success = await api_client.join_family(user_id, message.from_user.first_name, family["id"])
+            if success:
+                return await message.answer(
+                    f"🎉 Ти успішно приєднався до сім'ї <b>{family['name']}</b>!\nТепер ваші витрати спільні.",
+                    reply_markup=saas_kb(), parse_mode="HTML")
+        return await message.answer("❌ Помилка приєднання. Можливо, посилання недійсне.")
+
+    # 2. ЛОГІКА: LEGACY (Вадим та Аня)
     if user_id in USERS:
         name = USERS[user_id]
         await message.answer(f"Привіт, {name}! 👋", reply_markup=main_kb())
         return
 
-    # ЛОГІКА 2: SAAS (Всі інші користувачі)
-    is_registered = await api_client.check_user_registered(user_id)
+    # 3. ЛОГІКА: SAAS (Всі інші користувачі - Реєстрація або Вхід)
+    existing_user = await api_client.get_user_info(user_id)
 
-    if is_registered:
+    if existing_user:
         await message.answer("👋 З поверненням! Твоя фінансова панель готова:", reply_markup=saas_kb())
     else:
         text = (
@@ -554,7 +553,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
 @dp.message(SaaSOnboarding.family_name)
 async def saas_family_name(message: types.Message, state: FSMContext):
     await state.update_data(family_name=message.text)
-
     text = (
         "✅ Супер! Тепер підключимо <b>Monobank Автопілот</b> 🚀\n\n"
         "Це абсолютно безпечно — мені потрібна лише виписка, я не маю доступу до твоїх грошей.\n\n"
@@ -572,41 +570,51 @@ async def saas_family_name(message: types.Message, state: FSMContext):
 async def saas_mono_token(message: types.Message, state: FSMContext):
     data = await state.get_data()
     family_name = data['family_name']
-
-    token = None
-    if message.text.lower() != 'пропустити':
-        token = message.text  # Тут в майбутньому ми додамо шифрування Fernet
+    token = None if message.text.lower() == 'пропустити' else message.text
 
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+    invite_code = await api_client.register_saas_user(tg_id=message.from_user.id, name=message.from_user.first_name,
+                                                      family_name=family_name, mono_token=token)
 
-    success = await api_client.register_saas_user(
-        tg_id=message.from_user.id,
-        name=message.from_user.first_name,
-        family_name=family_name,
-        mono_token=token
-    )
+    if invite_code:
+        bot_info = await bot.get_me()
+        invite_link = f"https://t.me/{bot_info.username}?start=join_{invite_code}"
 
-    if success:
         await message.answer(
             f"🎉 <b>Вітаю! Простір '{family_name}' створено!</b>\n\n"
-            "Управління бюджетом, транзакції та скарбнички доступні в нашому Mini App. Натискай кнопку нижче, щоб почати! 👇",
+            f"🔗 <b>Твоє посилання-запрошення:</b>\n<code>{invite_link}</code>\n\n"
+            f"<i>Перешли його своєму партнеру, щоб вести спільний бюджет.</i>\n\n"
+            "Я додав тобі стандартні кнопки керування. Також ти можеш відкрити повноцінний застосунок BimiApp!",
             reply_markup=saas_kb(),
             parse_mode="HTML"
         )
     else:
         await message.answer("❌ Сталася помилка при реєстрації. Спробуй пізніше.")
-
     await state.clear()
+
+
+@dp.message(F.text == "📱 Відкрити BimiApp (Web)", StateFilter("*"))
+async def open_mini_app(message: types.Message):
+    MINI_APP_URL = "https://bimiapp.vshevchuk.pp.ua"
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Відкрити застосунок", web_app=WebAppInfo(url=MINI_APP_URL))]])
+    await message.answer("Твій фінансовий простір:", reply_markup=kb)
 
 
 @dp.message(F.text == "🔙 Назад", StateFilter("*"))
 async def go_back(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("Головне меню", reply_markup=main_kb())
+
+    # Гібридна логіка кнопки "Назад"
+    if message.from_user.id in USERS:
+        await message.answer("Головне меню", reply_markup=main_kb())
+    else:
+        await message.answer("Головне меню", reply_markup=saas_kb())
 
 
 @dp.message(F.text == "📂 Інше", StateFilter("*"))
 async def show_other_menu(message: types.Message):
+    # Дозволяємо меню "Інше" і для SaaS (поки вони юзають бот)
     await message.answer("Інструменти:", reply_markup=other_kb())
 
 
@@ -636,16 +644,13 @@ async def cmd_update(message: types.Message):
 
 @dp.message(Command("app"))
 async def cmd_app(message: types.Message):
-    # Дозволяємо команду як для Legacy (Вадим, Аня), так і для зареєстрованих SaaS-користувачів
+    # Команда /app більше не потрібна як основна, бо є кнопка, але залишаємо для зручності
     if message.from_user.id not in USERS:
-        is_registered = await api_client.check_user_registered(message.from_user.id)
-        if not is_registered:
+        if not await api_client.get_user_info(message.from_user.id):
             return await message.answer("Спершу зареєструйся через команду /start")
 
-    MINI_APP_URL = "https://bimiapp.vshevchuk.pp.ua"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Відкрити BimiApp", web_app=WebAppInfo(url=MINI_APP_URL))]
-    ])
+        [InlineKeyboardButton(text="📱 Відкрити BimiApp", web_app=WebAppInfo(url="https://bimiapp.vshevchuk.pp.ua"))]])
     await message.answer("Запускай новий міні-додаток тут (тестування):", reply_markup=kb)
 
 
@@ -712,26 +717,34 @@ async def full_amt(message: types.Message, state: FSMContext):
 @dp.message(FinanceForm.description)
 async def full_save(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    who = USERS.get(message.from_user.id, "Unknown")
+
+    # Визначаємо, хто пише (для SaaS чи Legacy)
+    if message.from_user.id in USERS:
+        who = USERS.get(message.from_user.id)
+    else:
+        who = message.from_user.first_name
+
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
-    # Тіньовий запис у PostgreSQL
+    # Shadow write для всіх
     asyncio.create_task(
         api_client.shadow_add_transaction(data['category'], data['amount'], data['t_type'], message.text, "Bot", who))
 
-    await run_sync(gs.add_transaction, datetime.now().strftime("%d.%m.%Y"), data['category'], data['amount'],
-                   data['t_type'], message.text, "Bot", who)
-
+    # Пишемо в Google Sheets ТІЛЬКИ якщо це Вадим або Аня
     alert = ""
-    if data['t_type'] == "Витрати":
-        limits = await run_sync(gs.get_budget_limits)
-        if data['category'] in limits:
-            limit = limits[data['category']]
-            stats = await run_sync(gs.get_month_stats)
-            spent = stats['categories_dict'].get(data['category'], 0)
-            if spent > limit: alert = f"\n⚠️ <b>Переліміт!</b> {spent:.0f} / {limit:.0f}"
+    if message.from_user.id in USERS:
+        await run_sync(gs.add_transaction, datetime.now().strftime("%d.%m.%Y"), data['category'], data['amount'],
+                       data['t_type'], message.text, "Bot", who)
+        if data['t_type'] == "Витрати":
+            limits = await run_sync(gs.get_budget_limits)
+            if data['category'] in limits:
+                limit = limits[data['category']]
+                stats = await run_sync(gs.get_month_stats)
+                spent = stats['categories_dict'].get(data['category'], 0)
+                if spent > limit: alert = f"\n⚠️ <b>Переліміт!</b> {spent:.0f} / {limit:.0f}"
 
-    await message.answer(f"✅ Записано: {data['amount']} грн ({data['category']}){alert}", reply_markup=main_kb(),
+    kb = main_kb() if message.from_user.id in USERS else saas_kb()
+    await message.answer(f"✅ Записано: {data['amount']} грн ({data['category']}){alert}", reply_markup=kb,
                          parse_mode="HTML")
     await state.clear()
 
@@ -739,10 +752,13 @@ async def full_save(message: types.Message, state: FSMContext):
 # ================= СКАРБНИЧКИ (БАНКИ) =================
 @dp.message(F.text == "🏦 Скарбнички", StateFilter("*"))
 async def jars_menu(message: types.Message, state: FSMContext):
+    # Поки що Jars читаються з Google Sheets, тому SaaS юзерам кажемо, що це в розробці
+    if message.from_user.id not in USERS:
+        return await message.answer("Скарбнички доступні в BimiApp!", reply_markup=saas_kb())
+
     await state.clear()
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     jars = await run_sync(gs.get_jars)
-
     text = "🏦 <b>Ваші Скарбнички (Банки):</b>\n➖➖➖➖➖➖\n"
     if not jars:
         text += "<i>Ще немає жодної банки. Створіть першу!</i>\n"
@@ -750,7 +766,6 @@ async def jars_menu(message: types.Message, state: FSMContext):
         for j in jars:
             pct = (j['balance'] / j['goal'] * 100) if j['goal'] > 0 else 0
             text += f"▫️ <b>{j['name']}</b>: {j['balance']:,.0f} / {j['goal']:,.0f} грн ({pct:.1f}%)\n"
-
     kb = get_keyboard(["📥 Поповнити", "➕ Створити банку", "🔙 Назад"])
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
@@ -788,7 +803,6 @@ async def create_jar_goal(message: types.Message, state: FSMContext):
 async def topup_jar_start(message: types.Message, state: FSMContext):
     jars = await run_sync(gs.get_jars)
     if not jars: return await message.answer("У вас немає банок. Створіть спочатку.", reply_markup=main_kb())
-
     kb_names = [j['name'] for j in jars]
     await state.set_state(JarForm.select_jar)
     await message.answer("Оберіть банку для поповнення:", reply_markup=get_keyboard(kb_names, back_btn=True))
@@ -808,18 +822,13 @@ async def topup_jar_amount(message: types.Message, state: FSMContext):
         amount = float(message.text.replace(',', '.'))
         data = await state.get_data()
         who = USERS.get(message.from_user.id, "Unknown")
-
         await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-
         res1 = await run_sync(gs.add_to_jar, data['jar_name'], amount)
         date_now = datetime.now().strftime("%d.%m.%Y")
-
         asyncio.create_task(api_client.shadow_add_transaction("🏦 Накопичення", amount, "Витрати",
                                                               f"Поповнення банки: {data['jar_name']}", "Jar-Auto", who))
-
         res2 = await run_sync(gs.add_transaction, date_now, f"🏦 Накопичення", amount, "Витрати",
                               f"Поповнення банки: {data['jar_name']}", "Jar-Auto", who)
-
         if res1 and res2:
             await message.answer(f"✅ Банку <b>{data['jar_name']}</b> успішно поповнено на {amount:,.0f} грн!",
                                  parse_mode="HTML", reply_markup=main_kb())
@@ -833,6 +842,9 @@ async def topup_jar_amount(message: types.Message, state: FSMContext):
 # ================= ПЕРЕКАЗ =================
 @dp.message(F.text == "💸 Переказ", StateFilter("*"))
 async def transfer_start(message: types.Message, state: FSMContext):
+    if message.from_user.id not in USERS:
+        return await message.answer("Ця функція доступна в BimiApp.", reply_markup=saas_kb())
+
     await state.clear()
     kb = [[KeyboardButton(text="🧔‍♂️ Вадим ➡️ 👩‍🦰 Аня")], [KeyboardButton(text="👩‍🦰 Аня ➡️ 🧔‍♂️ Вадим")],
           [KeyboardButton(text="🔙 Назад")]]
@@ -876,6 +888,8 @@ async def transfer_save(message: types.Message, state: FSMContext):
 # ================= ІСТОРІЯ =================
 @dp.message(F.text == "📜 Історія", StateFilter("*"))
 async def show_history(message: types.Message, state: FSMContext):
+    if message.from_user.id not in USERS: return await message.answer("Історія доступна в BimiApp.",
+                                                                      reply_markup=saas_kb())
     await state.clear()
     await render_history(message, page=1)
 
@@ -950,6 +964,8 @@ async def perform_delete(callback: CallbackQuery):
 # ================= ЗВІТИ ТА ВАЛЮТА =================
 @dp.message(F.text == "📄 Архів звітів", StateFilter("*"))
 async def report_start(message: types.Message, state: FSMContext):
+    if message.from_user.id not in USERS: return await message.answer("Архіви доступні в BimiApp.",
+                                                                      reply_markup=saas_kb())
     await state.clear()
     years_kb = [[KeyboardButton(text="2025"), KeyboardButton(text="2026")], [KeyboardButton(text="🔙 Назад")]]
     await state.set_state(ReportForm.year)
@@ -1004,6 +1020,8 @@ async def report_month(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "🇺🇸 Валюта", StateFilter("*"))
 async def curr_menu(message: types.Message, state: FSMContext):
+    if message.from_user.id not in USERS: return await message.answer("Ця функція переїхала в BimiApp.",
+                                                                      reply_markup=saas_kb())
     await state.clear()
     await message.answer("Меню валюти:", reply_markup=currency_kb())
 
@@ -1052,6 +1070,8 @@ async def curr_save(message: types.Message, state: FSMContext):
 # ================= СТАТИСТИКА =================
 @dp.message(F.text == "📊 Статистика", StateFilter("*"))
 async def show_stats(message: types.Message, state: FSMContext):
+    if message.from_user.id not in USERS: return await message.answer("Статистика доступна в BimiApp! 📱",
+                                                                      reply_markup=saas_kb())
     await state.clear()
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     stats = await run_sync(gs.get_month_stats)
@@ -1083,6 +1103,8 @@ async def show_stats(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "🍰 Діаграма", StateFilter("*"))
 async def send_chart(message: types.Message):
+    if message.from_user.id not in USERS: return await message.answer("Функція переїхала в BimiApp.",
+                                                                      reply_markup=saas_kb())
     await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_PHOTO)
     stats = await run_sync(gs.get_month_stats)
     if not stats or not stats['categories_dict']: return await message.answer("❌ Мало даних.")
@@ -1097,6 +1119,8 @@ async def send_chart(message: types.Message):
 
 @dp.message(F.text == "📉 Звіт (Тиждень)", StateFilter("*"))
 async def report_week(message: types.Message):
+    if message.from_user.id not in USERS: return await message.answer("Функція переїхала в BimiApp.",
+                                                                      reply_markup=saas_kb())
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     stats = await run_sync(gs.get_week_stats)
     if not stats: return await message.answer("❌ Немає даних.")
@@ -1108,6 +1132,8 @@ async def report_week(message: types.Message):
 
 @dp.message(F.text == "🔔 Перевірити ліміти", StateFilter("*"))
 async def check_limits(message: types.Message, state: FSMContext):
+    if message.from_user.id not in USERS: return await message.answer("Функція переїхала в BimiApp.",
+                                                                      reply_markup=saas_kb())
     await state.clear()
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     limits = await run_sync(gs.get_budget_limits)
@@ -1124,6 +1150,8 @@ async def check_limits(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "⚙️ Змінити ліміт", StateFilter("*"))
 async def edit_limit_start(message: types.Message, state: FSMContext):
+    if message.from_user.id not in USERS: return await message.answer("Функція переїхала в BimiApp.",
+                                                                      reply_markup=saas_kb())
     await state.clear()
     await state.set_state(FinanceForm.edit_limit_cat)
     await message.answer("Обери категорію:", reply_markup=limits_edit_kb())
