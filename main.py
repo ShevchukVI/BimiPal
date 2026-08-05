@@ -553,7 +553,7 @@ async def cmd_update(message: types.Message):
 @dp.message(Command("app"))
 async def cmd_app(message: types.Message):
     if message.from_user.id not in USERS: return
-    MINI_APP_URL = "https://your-tunnel.trycloudflare.com"
+    MINI_APP_URL = "https://bimiapp.vshevchuk.pp.ua"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📱 Відкрити BimiApp", web_app=WebAppInfo(url=MINI_APP_URL))]
     ])
