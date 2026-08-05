@@ -88,6 +88,12 @@ class JarForm(StatesGroup):
     select_jar, add_amount = State(), State()
 
 
+# Стан для реєстрації нових користувачів (SaaS)
+class SaaSOnboarding(StatesGroup):
+    family_name = State()
+    mono_token = State()
+
+
 # --- ДОПОМІЖНІ ФУНКЦІЇ ---
 async def run_sync(func, *args, **kwargs):
     return await asyncio.get_running_loop().run_in_executor(None, partial(func, *args, **kwargs))
@@ -149,6 +155,13 @@ def generate_mono_keyboard(mono_id, user_id):
         InlineKeyboardButton(text="❌ Стерти", callback_data=f"mdel:{mono_id}")
     ])
     return InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+
+def saas_kb():
+    MINI_APP_URL = "https://bimiapp.vshevchuk.pp.ua"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 Відкрити BimiApp", web_app=WebAppInfo(url=MINI_APP_URL))]
+    ])
 
 
 # ================= МОНОБАНК: ВЕБ-СЕРВЕР ТА АПІ =================
@@ -506,13 +519,84 @@ async def receipt_cancel(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
 
 
-# ================= СТАНДАРТНІ КОМАНДИ БОТА =================
+# ================= СТАНДАРТНІ КОМАНДИ БОТА ТА SAAS ONBOARDING =================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    if message.from_user.id not in USERS: return
-    name = USERS[message.from_user.id]
-    await message.answer(f"Привіт, {name}! 👋", reply_markup=main_kb())
+    user_id = message.from_user.id
+
+    # ЛОГІКА 1: LEGACY (Вадим та Аня)
+    if user_id in USERS:
+        name = USERS[user_id]
+        await message.answer(f"Привіт, {name}! 👋", reply_markup=main_kb())
+        return
+
+    # ЛОГІКА 2: SAAS (Всі інші користувачі)
+    is_registered = await api_client.check_user_registered(user_id)
+
+    if is_registered:
+        await message.answer("👋 З поверненням! Твоя фінансова панель готова:", reply_markup=saas_kb())
+    else:
+        text = (
+            "🏦 <b>Привіт! Я — Bimi.</b>\n"
+            "Твій розумний сімейний фінансовий помічник.\n\n"
+            "✨ <b>Що я вмію:</b>\n"
+            "▫️ Автоматично ловити витрати з Монобанку.\n"
+            "▫️ Розпізнавати товари з фотографій чеків (ШІ).\n"
+            "▫️ Вести спільний бюджет з партнером.\n"
+            "▫️ Показувати красиву аналітику.\n\n"
+            "Давай налаштуємо твій простір! Як назвемо вашу сім'ю чи бюджет? (Наприклад: <i>Сім'я Коваленків</i> або <i>Бюджет Макса</i>)"
+        )
+        await state.set_state(SaaSOnboarding.family_name)
+        await message.answer(text, parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+
+
+@dp.message(SaaSOnboarding.family_name)
+async def saas_family_name(message: types.Message, state: FSMContext):
+    await state.update_data(family_name=message.text)
+
+    text = (
+        "✅ Супер! Тепер підключимо <b>Monobank Автопілот</b> 🚀\n\n"
+        "Це абсолютно безпечно — мені потрібна лише виписка, я не маю доступу до твоїх грошей.\n\n"
+        "<b>Як отримати токен:</b>\n"
+        "1. Перейди за посиланням: https://api.monobank.ua/\n"
+        "2. Авторизуйся через додаток Монобанку.\n"
+        "3. Скопіюй токен і надішли його мені сюди.\n\n"
+        "<i>(Якщо не хочеш підключати Монобанк зараз, просто напиши 'пропустити')</i>"
+    )
+    await state.set_state(SaaSOnboarding.mono_token)
+    await message.answer(text, parse_mode="HTML")
+
+
+@dp.message(SaaSOnboarding.mono_token)
+async def saas_mono_token(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    family_name = data['family_name']
+
+    token = None
+    if message.text.lower() != 'пропустити':
+        token = message.text  # Тут в майбутньому ми додамо шифрування Fernet
+
+    await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+
+    success = await api_client.register_saas_user(
+        tg_id=message.from_user.id,
+        name=message.from_user.first_name,
+        family_name=family_name,
+        mono_token=token
+    )
+
+    if success:
+        await message.answer(
+            f"🎉 <b>Вітаю! Простір '{family_name}' створено!</b>\n\n"
+            "Управління бюджетом, транзакції та скарбнички доступні в нашому Mini App. Натискай кнопку нижче, щоб почати! 👇",
+            reply_markup=saas_kb(),
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer("❌ Сталася помилка при реєстрації. Спробуй пізніше.")
+
+    await state.clear()
 
 
 @dp.message(F.text == "🔙 Назад", StateFilter("*"))
@@ -552,7 +636,12 @@ async def cmd_update(message: types.Message):
 
 @dp.message(Command("app"))
 async def cmd_app(message: types.Message):
-    if message.from_user.id not in USERS: return
+    # Дозволяємо команду як для Legacy (Вадим, Аня), так і для зареєстрованих SaaS-користувачів
+    if message.from_user.id not in USERS:
+        is_registered = await api_client.check_user_registered(message.from_user.id)
+        if not is_registered:
+            return await message.answer("Спершу зареєструйся через команду /start")
+
     MINI_APP_URL = "https://bimiapp.vshevchuk.pp.ua"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📱 Відкрити BimiApp", web_app=WebAppInfo(url=MINI_APP_URL))]
