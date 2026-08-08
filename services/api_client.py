@@ -24,31 +24,43 @@ class BimiAPIClient:
         self.base_url = base_url
 
     async def _get(self, endpoint, headers=None):
+        url = f"{self.base_url}{endpoint}"
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"{self.base_url}{endpoint}", headers=headers or _API_HEADERS, timeout=5) as resp:
-                    if resp.status == 200: return await resp.json()
+                async with session.get(url, headers=headers or _API_HEADERS, timeout=5) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    body = (await resp.text())[:200]
+                    logger.error(f"API GET {url} -> HTTP {resp.status}: {body}")
         except Exception as e:
-            logger.error(f"API GET Error {endpoint}: {e}")
+            logger.error(f"API GET {url} EXCEPTION {type(e).__name__}: {e}")
         return None
 
     async def _post(self, endpoint, payload, method="post", headers=None):
+        url = f"{self.base_url}{endpoint}"
         try:
             async with aiohttp.ClientSession() as session:
                 req = getattr(session, method)
-                async with req(f"{self.base_url}{endpoint}", json=payload, headers=headers or _API_HEADERS, timeout=5) as resp:
-                    if resp.status in (200, 201): return await resp.json()
+                async with req(url, json=payload, headers=headers or _API_HEADERS, timeout=5) as resp:
+                    if resp.status in (200, 201):
+                        return await resp.json()
+                    body = (await resp.text())[:200]
+                    logger.error(f"API {method.upper()} {url} -> HTTP {resp.status}: {body}")
         except Exception as e:
-            logger.error(f"API POST Error {endpoint}: {e}")
+            logger.error(f"API {method.upper()} {url} EXCEPTION {type(e).__name__}: {e}")
         return None
 
     async def _delete(self, endpoint, headers=None):
+        url = f"{self.base_url}{endpoint}"
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.delete(f"{self.base_url}{endpoint}", headers=headers or _API_HEADERS, timeout=5) as resp:
-                    return resp.status in (200, 204)
-        except Exception:
-            pass
+                async with session.delete(url, headers=headers or _API_HEADERS, timeout=5) as resp:
+                    if resp.status in (200, 204):
+                        return True
+                    body = (await resp.text())[:200]
+                    logger.error(f"API DELETE {url} -> HTTP {resp.status}: {body}")
+        except Exception as e:
+            logger.error(f"API DELETE {url} EXCEPTION {type(e).__name__}: {e}")
         return False
 
     # --- CORE METHODS ---
