@@ -10,7 +10,8 @@ from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from services.api_client import api_client
+from services.api_client import api_client, _headers
+import config
 from config import APP_URL
 from handlers import bot, dp
 from handlers.monobank import fetch_mono_balance
@@ -89,6 +90,90 @@ async def cmd_restart(message: types.Message, state: FSMContext):
     sys.exit(0)
 
 
+@dp.message(F.text == "💳 Монобанк", StateFilter("*"))
+async def monobank_menu(message: types.Message, state: FSMContext):
+    await state.clear()
+    user_info = await api_client.get_me(message.from_user.id)
+    if not user_info:
+        return await message.answer("❌ Спочатку створи профіль через /start")
+    has_token = user_info.get("has_mono_token", False)
+    if has_token:
+        bal = await fetch_mono_balance(message.from_user.id)
+        await message.answer(
+            f"💳 <b>Monobank підключено</b>\n💰 Баланс: {bal:,.0f} ₴\n\n"
+            "Команди:\n"
+            "/monoset ТОКЕН — оновити токен\n"
+            "/monosync — синхронізувати рахунки",
+            parse_mode="HTML", reply_markup=main_kb()
+        )
+    else:
+        await message.answer(
+            "💳 <b>Як підключити Monobank:</b>\n\n"
+            "1. Перейди на api.monobank.ua\n"
+            "2. Отримай персональний токен\n"
+            "3. Надішли команду:\n<code>/monoset ТВІЙ_ТОКЕН</code>\n\n"
+            "<i>Токен зберігається у зашифрованому вигляді та ніколи не передається третім особам.</i>",
+            parse_mode="HTML", disable_web_page_preview=True
+        )
+
+
+@dp.message(Command("monoset"), StateFilter("*"))
+async def cmd_monoset(message: types.Message, state: FSMContext, command: Command):
+    await state.clear()
+    token_raw = command.args.strip() if command.args else ""
+    if not token_raw:
+        return await message.answer(
+            "💳 <b>Як підключити Monobank:</b>\n\n"
+            "1. Перейди на <a href='https://api.monobank.ua'>api.monobank.ua</a>\n"
+            "2. Отримай персональний токен\n"
+            "3. Надішли його сюди командою:\n<code>/monoset ТВІЙ_ТОКЕН</code>\n\n"
+            "<i>Токен зберігається у зашифрованому вигляді.</i>",
+            parse_mode="HTML", disable_web_page_preview=True
+        )
+    user_info = await api_client.get_me(message.from_user.id)
+    if not user_info:
+        return await message.answer("❌ Спочатку створи профіль через /start")
+    res = await api_client._post(
+        f"/users/me/token",
+        {"mono_token": token_raw},
+        method="put",
+        headers=_headers(x_user_id=user_info["id"])
+    )
+    if res:
+        await message.answer("✅ Токен збережено! Використай /monosync для синхронізації рахунків.", reply_markup=main_kb())
+        # Автоматично синхронізуємо
+        from handlers.monobank import setup_monobank
+        await setup_monobank()
+    else:
+        await message.answer("❌ Не вдалося зберегти токен. Спробуй через Mini App.", reply_markup=main_kb())
+
+
+@dp.message(Command("monosync"), StateFilter("*"))
+async def cmd_monosync(message: types.Message, state: FSMContext):
+    await state.clear()
+    msg = await message.answer("🔄 Синхронізація Monobank...")
+    results = await api_client._post(f"/banking/sync?webhook_url={config.WEBHOOK_URL}", [], method="post")
+    if not results:
+        return await msg.edit_text("❌ Помилка синхронізації. Спробуйте пізніше.")
+
+    lines = ["💳 <b>Результат синхронізації:</b>"]
+    for r in results:
+        user_info = await api_client.get_me(r["tg_id"])
+        name = user_info["name"] if user_info else f"User {r['tg_id']}"
+        if r.get("error"):
+            lines.append(f"❌ {name}: {r['error']}")
+        elif r["accounts_synced"] == 0:
+            lines.append(f"⚠️ {name}: Monobank не повернув жодного рахунку")
+        else:
+            lines.append(f"✅ {name}: {r['accounts_synced']} рахунків синхронізовано")
+
+    # Reload accounts
+    from handlers.monobank import _load_accounts_from_backend
+    await _load_accounts_from_backend()
+
+    await msg.edit_text("\n".join(lines), parse_mode="HTML")
+
+
 @dp.message(Command("update"), StateFilter("*"))
 async def cmd_update(message: types.Message, state: FSMContext):
     await state.clear()
@@ -146,6 +231,15 @@ async def show_stats(message: types.Message, state: FSMContext):
     for cat in stats['top_categories'][:5]:
         clean_name = clean_category_name(cat['name'])
         text += f"▫️ {clean_name}: {cat['amount']:,.0f} ₴\n"
+
+    # Показуємо тільки нові досягнення (останні 3)
+    achievements = await api_client._get(f"/system/achievements?tg_id={message.from_user.id}")
+    if achievements:
+        latest = achievements[-3:]
+        if latest:
+            text += "➖➖➖➖➖➖\n🌟 <b>Нові досягнення:</b>\n"
+            for a in latest:
+                text += f"{a['icon']} {a['name']}\n"
 
     await message.answer(text.replace(",", " "), parse_mode="HTML")
 

@@ -4,6 +4,7 @@
 # (далі користувач розбирає його через Inbox Zero).
 import base64
 import io
+import logging
 
 from aiogram import F, types
 from aiogram.enums import ChatAction
@@ -14,6 +15,10 @@ from aiogram.fsm.state import State, StatesGroup
 from services.api_client import api_client
 from handlers import bot, dp
 from keyboards.inline import receipt_confirm_kb
+
+logger = logging.getLogger(__name__)
+
+MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB limit
 
 try:
     from services.ai_service import ai_manager
@@ -33,8 +38,13 @@ async def receipt_photo(message: types.Message, state: FSMContext):
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
     photo = message.photo[-1]
+    if photo.file_size and photo.file_size > MAX_IMAGE_BYTES:
+        return await message.answer("❌ Зображення занадто велике (макс. 5 MB). Надішли менше фото.")
     buf = io.BytesIO()
     await bot.download(photo, destination=buf)
+    image_size = buf.tell()
+    if image_size > MAX_IMAGE_BYTES:
+        return await message.answer("❌ Зображення занадто велике після завантаження. Стисни та спробуй ще.")
     base64_image = base64.b64encode(buf.getvalue()).decode()
 
     parsed = await ai_manager.parse_receipt_image(base64_image)

@@ -22,7 +22,7 @@ def other_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🏦 Скарбнички")],
         [KeyboardButton(text="👨👩👧 Сім'я")],
-        [KeyboardButton(text="🔔 Ліміти (В розробці)")],
+        [KeyboardButton(text="💳 Монобанк"), KeyboardButton(text="📄 Звіт")],
         [KeyboardButton(text="🔙 Назад")]
     ], resize_keyboard=True)
 

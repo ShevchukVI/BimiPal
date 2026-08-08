@@ -8,4 +8,4 @@ from config import BOT_TOKEN
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-from handlers import base, expenses, families, monobank, smart_receipts, scratchpad  # noqa: E402,F401
+from handlers import base, expenses, families, monobank, reports, smart_receipts, scratchpad  # noqa: E402,F401

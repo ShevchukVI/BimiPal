@@ -1,0 +1,18 @@
+services:
+
+  bot:
+    build: .
+    container_name: bimipal_bot
+    restart: unless-stopped
+
+    ports:
+      - "18080:18080"
+
+    volumes:
+      - .:/app
+
+    environment:
+      - TZ=Europe/Kyiv
+
+    labels:
+      icon: "https://cdn-icons-png.flaticon.com/512/4712/4712010.png"

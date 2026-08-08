@@ -1,0 +1,17 @@
+.env
+.env.*
+.git
+__pycache__
+*.pyc
+venv
+.env.example
+README.md
+CHEAT_SHEET.md
+PROJECT_CARD.md
+push.sh
+Run_Bot.bat
+service_account*.json
+.idea
+.vscode
+.vscode/
+.idea/

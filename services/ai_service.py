@@ -15,22 +15,32 @@ class AIManager:
             api_key=OPENROUTER_API_KEY,
         )
 
-    async def _safe_request(self, messages, model, max_retries=2, temperature=0.1):
+    async def _safe_request(self, messages, model, max_retries=2, temperature=0.1, max_tokens=2000):
         delay = 1
         for attempt in range(max_retries):
             try:
-                response = await self.client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature
+                response = await asyncio.wait_for(
+                    self.client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    ),
+                    timeout=30
                 )
                 if hasattr(response, 'choices') and len(response.choices) > 0:
                     return response.choices[0].message.content
                 else:
-                    logger.error("ШІ Помилка: Порожня відповідь від OpenRouter.")
+                    logger.error("AI Error: Empty response from OpenRouter.")
                     return None
+            except asyncio.TimeoutError:
+                logger.error(f"AI Timeout (attempt {attempt + 1}/{max_retries})")
+                if attempt >= max_retries - 1:
+                    return None
+                await asyncio.sleep(delay)
+                delay *= 2
             except Exception as e:
-                logger.error(f"ШІ Помилка (Спроба {attempt + 1}/{max_retries}): {e}")
+                logger.error(f"AI Error (attempt {attempt + 1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(delay)
                     delay *= 2

@@ -1,10 +1,11 @@
 # handlers/monobank.py
-# Інтеграція з Monobank: вебхуки, баланси, Inbox Zero (розбір "Очікує").
 import asyncio
+import logging
 import time
 
-import aiohttp
 from aiohttp import web
+
+logger = logging.getLogger(__name__)
 
 from aiogram import F, types
 from aiogram.enums import ChatAction
@@ -26,60 +27,48 @@ class MonoCommentForm(StatesGroup):
     text = State()
 
 
+async def _load_accounts_from_backend():
+    """Завантажує banking-аккаунти з backend при старті."""
+    accounts = await api_client._get("/banking/accounts")
+    if accounts:
+        for a in accounts:
+            MONO_ACCOUNT_TO_USER[a["external_account_id"]] = a["user_id"]
+
+
 # ================= МОНОБАНК: НАЛАШТУВАННЯ ТА ВЕБХУКИ =================
 async def setup_monobank():
-    tokens_data = await api_client._get("/system/mono-tokens")
-    if not tokens_data:
+    # Делегуємо синхронізацію backend'у (accounts + webhooks)
+    results = await api_client._post(
+        f"/banking/sync?webhook_url={WEBHOOK_URL}",
+        [], method="post"
+    )
+    if not results:
+        logger.warning("No Monobank tokens found — webhooks NOT registered")
         return
 
-    for item in tokens_data:
-        tg_id = item['tg_id']
-        token = item['mono_token']
-        async with aiohttp.ClientSession() as session:
-            try:
-                await session.post("https://api.monobank.ua/personal/webhook", headers={"X-Token": token},
-                                   json={"webHookUrl": WEBHOOK_URL})
-            except Exception:
-                pass
-            try:
-                async with session.get("https://api.monobank.ua/personal/client-info",
-                                       headers={"X-Token": token}) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        for acc in data.get("accounts", []):
-                            MONO_ACCOUNT_TO_USER[acc["id"]] = tg_id
-            except Exception:
-                pass
+    # Оновлюємо локальний mapping з бази
+    accounts = await api_client._get("/banking/accounts")
+    if accounts:
+        MONO_ACCOUNT_TO_USER.clear()
+        for a in accounts:
+            MONO_ACCOUNT_TO_USER[a["external_account_id"]] = a["user_id"]
+        logger.info(f"Loaded {len(accounts)} bank accounts from backend")
+    else:
+        logger.warning("No bank accounts returned from backend")
 
 
 async def fetch_mono_balance(tg_id: int):
-    user_info = await api_client.get_me(tg_id)
-    if not user_info or not user_info.get("has_mono_token"):
-        return 0.0
-
     if tg_id not in MONO_BALANCES_CACHE:
         MONO_BALANCES_CACHE[tg_id] = {"time": 0, "balance": 0.0}
     now = time.time()
     if now - MONO_BALANCES_CACHE[tg_id]["time"] < 65:
         return MONO_BALANCES_CACHE[tg_id]["balance"]
 
-    tokens_data = await api_client._get("/system/mono-tokens")
-    token = next((t['mono_token'] for t in tokens_data if t['tg_id'] == tg_id), None) if tokens_data else None
-
-    if not token:
-        return 0.0
-
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get("https://api.monobank.ua/personal/client-info", headers={"X-Token": token}) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    total_bal = sum(
-                        (acc.get("balance", 0) - acc.get("creditLimit", 0)) for acc in data.get("accounts", [])) / 100.0
-                    MONO_BALANCES_CACHE[tg_id] = {"time": now, "balance": total_bal}
-                    return total_bal
-        except Exception:
-            pass
+    result = await api_client._get(f"/banking/balance/{tg_id}")
+    if result and result.get("has_token"):
+        bal = result["balance"]
+        MONO_BALANCES_CACHE[tg_id] = {"time": now, "balance": bal}
+        return bal
     return MONO_BALANCES_CACHE[tg_id]["balance"]
 
 

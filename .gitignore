@@ -11,5 +11,3 @@ node_modules/
 dist/
 .idea/
 .vscode/
-*.txt
-pack_project.py
