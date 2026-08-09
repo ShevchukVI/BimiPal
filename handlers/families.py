@@ -40,7 +40,7 @@ async def switch_family(call: types.CallbackQuery):
     fams = await api_client.get_my_families(user_info["id"])
     active = next((f for f in fams if f.get("is_active")), None)
     name = active["name"] if active else f"ID {family_id}"
-    await call.message.edit_text(f"✅ Active family switched to: <b>{name}</b>",
+    await call.message.edit_text(f"✅ Активна сім'я: <b>{name}</b>",
                                  reply_markup=families_kb(fams), parse_mode="HTML")
 
 
@@ -79,6 +79,8 @@ async def generate_invite_link(call: types.CallbackQuery):
     if not res:
         return await call.answer("Помилка генерації запрошення", show_alert=True)
     bot_info = await bot.get_me()
-    link = f"https://t.me/{bot_info.username}?start={res['invite_code']}"
-    await call.message.edit_text(f"🔗 <b>Запрошення до сім'ї:</b>\n<code>{link}</code>",
-                                 reply_markup=manage_family_kb(), parse_mode="HTML")
+    link = f"https://t.me/{bot_info.username}?start=join_{res['invite_code']}"
+    await call.message.edit_text(
+        f"🔗 <b>Запрошення до сім'ї «{active['name']}»:</b>\n<code>{link}</code>\n\n"
+        f"<i>Надішли це посилання члену сім'ї — після /start він автоматично приєднається.</i>",
+        reply_markup=manage_family_kb(), parse_mode="HTML")

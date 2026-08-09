@@ -102,6 +102,7 @@ async def process_mono_webhook_background(data):
             res = await api_client.add_transaction(user_info["current_active_family_id"], user_info["id"], pending_cat, real_amount,
                                                    "Витрати", f"❓ {desc}", "Монобанк", mono_id)
             if res:
+                cats = [c for c in cats if "Очікує" not in c['name']]
                 try:
                     await bot.send_message(tg_id,
                                            f"💳 <b>Нова витрата:</b>\n💰 {real_amount:.2f} ₴\n🛒 {desc}\n\n<i>Обери категорію:</i>",
@@ -136,12 +137,14 @@ async def send_next_unresolved(chat_id, tg_id):
 
     tx = unresolved[0]
     cats = await api_client.get_categories(user_info["current_active_family_id"], "expense")
+    cats = [c for c in cats if "Очікує" not in c['name']]
     await bot.send_message(chat_id,
-                           f"⏳ <b>Нерозібрана витрата:</b>\n📅 {tx['date']}\n💰 {tx['amount']} ₴\n🛒 {tx['title']}\n\n<i>Обери категорію:</i>",
+                           f"⏳ <b>Нерозібраних: {len(unresolved)}</b>\n"
+                           f"📅 {tx['date']}\n💰 {tx['amount']} ₴\n🛒 {tx['title']}\n\n<i>Обери категорію:</i>",
                            reply_markup=generate_mono_keyboard(tx["mono_id"], cats), parse_mode="HTML")
 
 
-@dp.message(F.text == "🧹 Розібрати 'Очікує'", StateFilter("*"))
+@dp.message(F.text.startswith("🧹 Розібрати"), StateFilter("*"))
 async def trigger_inbox_zero(message: types.Message):
     await send_next_unresolved(message.chat.id, message.from_user.id)
 

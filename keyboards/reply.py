@@ -10,19 +10,23 @@ def clean_category_name(name: str) -> str:
     return re.sub(r'^[^\w\s]+', '', name).strip()
 
 
-def main_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="💸 Витрата (Готівка)"), KeyboardButton(text="💰 Дохід")],
+def main_kb(pending: int = 0) -> ReplyKeyboardMarkup:
+    """Головне меню. Якщо є нерозібрані Monobank-транзакції — додаємо рядок Inbox Zero."""
+    rows = [
+        [KeyboardButton(text="💸 Витрата"), KeyboardButton(text="💰 Дохід")],
         [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="📂 Інше")],
-        [KeyboardButton(text="📱 Відкрити BimiApp")]
-    ], resize_keyboard=True)
+    ]
+    if pending > 0:
+        rows.append([KeyboardButton(text=f"🧹 Розібрати ({pending})")])
+    rows.append([KeyboardButton(text="📱 Відкрити BimiApp")])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 def other_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="🏦 Скарбнички")],
-        [KeyboardButton(text="👨👩👧 Сім'я")],
-        [KeyboardButton(text="💳 Монобанк"), KeyboardButton(text="📄 Звіт")],
+        [KeyboardButton(text="🧹 Розібрати"), KeyboardButton(text="🏦 Скарбнички")],
+        [KeyboardButton(text="👨👩👧 Сім'я"), KeyboardButton(text="💳 Монобанк")],
+        [KeyboardButton(text="📄 Звіт")],
         [KeyboardButton(text="🔙 Назад")]
     ], resize_keyboard=True)
 
@@ -39,6 +43,14 @@ def categories_kb(cats) -> ReplyKeyboardMarkup:
         kb_rows.append(row)
     kb_rows.append([KeyboardButton(text="🔙 Назад")])
     return ReplyKeyboardMarkup(keyboard=kb_rows, resize_keyboard=True)
+
+
+def description_kb() -> ReplyKeyboardMarkup:
+    """Крок опису транзакції: опис можна пропустити (тоді title = назва категорії)."""
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="⏭ Пропустити")],
+        [KeyboardButton(text="🔙 Назад")]
+    ], resize_keyboard=True)
 
 
 def remove_kb() -> ReplyKeyboardRemove:

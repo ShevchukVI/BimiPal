@@ -65,3 +65,23 @@ def manage_family_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔗 Згенерувати запрошення", callback_data="fam_invite")],
         [InlineKeyboardButton(text="🔙 До сімей", callback_data="fam_list")],
     ])
+
+
+def quick_add_kb(cats) -> InlineKeyboardMarkup:
+    """Категорії для швидкого додавання («150 такси»). callback — індекс у списку."""
+    kb_rows, row = [], []
+    for i, c in enumerate(cats[:10]):
+        row.append(InlineKeyboardButton(text=c['name'], callback_data=f"qa:{i}"))
+        if len(row) == 2:
+            kb_rows.append(row)
+            row = []
+    if row:
+        kb_rows.append(row)
+    kb_rows.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="qac")])
+    return InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+
+def quick_add_undo_kb(tx_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↩️ Скасувати запис", callback_data=f"qu:{tx_id}")]
+    ])

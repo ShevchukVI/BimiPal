@@ -86,7 +86,7 @@ async def receipt_save(call: types.CallbackQuery, state: FSMContext):
                                            "Витрати", title, "Готівка")
     if res:
         await call.message.edit_text(
-            f"✅ <b>Чек записано ({total:.2f} ₴)</b>\n\nТепер розбери його по категоріях через Inbox Zero.",
+            f"✅ <b>Чек записано ({total:.2f} ₴)</b>\n\nОбери йому категорію через «🧹 Розібрати» в головному меню.",
             parse_mode="HTML")
     else:
         await call.message.edit_text("❌ Помилка збереження чека.")
