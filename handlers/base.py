@@ -36,7 +36,7 @@ async def _pending_count(user_info: dict) -> int:
 async def _send_main_menu(message: types.Message, user_info: dict, text: str = None):
     """Надіслати головне меню з актуальним лічильником Inbox Zero."""
     pending = await _pending_count(user_info)
-    await message.answer(text or "Головне меню", reply_markup=main_kb(pending))
+    await message.answer(text or "Головне меню", reply_markup=main_kb(pending), parse_mode="HTML")
 
 
 @dp.message(CommandStart(), StateFilter("*"))

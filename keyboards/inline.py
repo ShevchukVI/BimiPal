@@ -67,16 +67,21 @@ def manage_family_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def quick_add_kb(cats) -> InlineKeyboardMarkup:
-    """Категорії для швидкого додавання («150 такси»). callback — індекс у списку."""
+def quick_add_kb(cats, expanded: bool = False) -> InlineKeyboardMarkup:
+    """Категорії для швидкого додавання («150 такси»). callback — індекс у списку.
+    Без expanded: максимум 6 категорій + кнопка «Всі категорії». Завжди є «➕ Нова категорія»."""
+    shown = cats if expanded else cats[:6]
     kb_rows, row = [], []
-    for i, c in enumerate(cats[:10]):
+    for i, c in enumerate(shown):
         row.append(InlineKeyboardButton(text=c['name'], callback_data=f"qa:{i}"))
         if len(row) == 2:
             kb_rows.append(row)
             row = []
     if row:
         kb_rows.append(row)
+    if not expanded and len(cats) > 6:
+        kb_rows.append([InlineKeyboardButton(text=f"📂 Всі категорії ({len(cats)})", callback_data="qaall")])
+    kb_rows.append([InlineKeyboardButton(text="➕ Нова категорія", callback_data="qanew")])
     kb_rows.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="qac")])
     return InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
