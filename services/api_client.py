@@ -206,39 +206,67 @@ class BimiAPIClient:
         return history
 
     async def get_month_history_sql(self, family_id: int, year: int, month: int):
-        """Генерує словник для створення PDF-звітів (раніше робилось через GS)"""
+        """Генерує словник для створення PDF-звітів, згрупований ПО ВАЛЮТАХ.
+        Повертає:
+          income/expense/balance — тільки UAH (зворотна сумісність),
+          currencies — {code: {"income": .., "expense": .., "balance": ..,
+                               "grouped_categories": [{name, total, txs, top_txs}]}}
+        """
         txs = await self._get(f"/families/{family_id}/transactions?limit=1000")
         if not txs: return None
-        income, expense = 0.0, 0.0
-        cats_dict = {}
         cats = await self.get_categories(family_id)
         cat_map = {c['id']: c['name'] for c in cats}
 
+        # currency -> {income, expense, cats_dict}
+        by_cur = {}
+
         for t in txs:
             try:
-                if t['type'] == "Переказ":
+                if t.get('type') == "Переказ":
                     continue  # перекази між джерелами — не дохід/витрата у звітах
+                if t.get('jar_id') is not None:
+                    continue  # скарбнички — внутрішній рух, не дохід/витрата
                 d = datetime.strptime(t['date'], "%Y-%m-%d")
                 if d.year == year and d.month == month:
                     amt = t['amount']
+                    cur = t.get('currency') or "UAH"
+                    bucket = by_cur.setdefault(cur, {"income": 0.0, "expense": 0.0, "cats": {}})
                     cat_name = cat_map.get(t['category_id'], "Інше")
                     if t['type'] == "Поповнення":
-                        income += amt
+                        bucket["income"] += amt
                     else:
-                        expense += amt
-                        if cat_name not in cats_dict: cats_dict[cat_name] = {'total': 0.0, 'txs': []}
-                        cats_dict[cat_name]['total'] += amt
-                        cats_dict[cat_name]['txs'].append({
-                            "date": d.strftime("%d.%m.%Y"), "amount": amt, "desc": t['title'], "who": ""
+                        bucket["expense"] += amt
+                        cd = bucket["cats"].setdefault(cat_name, {'total': 0.0, 'txs': []})
+                        cd['total'] += amt
+                        cd['txs'].append({
+                            "date": d.strftime("%d.%m.%Y"), "amount": amt,
+                            "desc": t['title'], "who": "", "currency": cur,
                         })
             except Exception:
                 pass
-        if income == 0 and expense == 0: return None
+        if not by_cur:
+            return None
 
-        sorted_cats = sorted([{"name": k, "total": v['total'], "txs": v['txs']} for k, v in cats_dict.items()],
-                             key=lambda x: x['total'], reverse=True)
-        for c in sorted_cats: c['top_txs'] = sorted(c['txs'], key=lambda x: x['amount'], reverse=True)[:3]
-        return {"income": income, "expense": expense, "balance": income - expense, "grouped_categories": sorted_cats}
+        currencies = {}
+        for cur, b in by_cur.items():
+            sorted_cats = sorted([{"name": k, "total": v['total'], "txs": v['txs']}
+                                  for k, v in b["cats"].items()],
+                                 key=lambda x: x['total'], reverse=True)
+            for c in sorted_cats:
+                c['top_txs'] = sorted(c['txs'], key=lambda x: x['amount'], reverse=True)[:3]
+            currencies[cur] = {
+                "income": round(b["income"], 2),
+                "expense": round(b["expense"], 2),
+                "balance": round(b["income"] - b["expense"], 2),
+                "grouped_categories": sorted_cats,
+            }
+
+        # Зворотна сумісність: головні поля — UAH (або перша доступна валюта, якщо UAH немає)
+        main = currencies.get("UAH") or next(iter(currencies.values()))
+        return {"income": main["income"], "expense": main["expense"],
+                "balance": main["balance"],
+                "grouped_categories": main["grouped_categories"],
+                "currencies": currencies}
 
     async def create_transfer(self, family_id: int, user_id: int, amount: float,
                               from_account: str, to_account: str):
