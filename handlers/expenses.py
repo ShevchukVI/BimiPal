@@ -38,7 +38,7 @@ async def add_tx_start(message: types.Message, state: FSMContext):
 
     await state.update_data(t_type=t_type, family_id=user_info["current_active_family_id"], user_id=user_info["id"], cats=cats)
     await state.set_state(FinanceForm.category_id)
-    hint = "💡 Або просто напиши «150 такси» — без кнопок."
+    hint = "💡 Або просто напиши «150 таксі» — без кнопок."
     await message.answer(f"Обери категорію:\n\n{hint}", reply_markup=categories_kb(cats))
 
 

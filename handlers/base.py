@@ -59,7 +59,7 @@ async def cmd_start(message: types.Message, state: FSMContext, command: Command)
                 message, user_info,
                 f"🎉 <b>Ти приєднався до сім'ї «{esc(family['name'])}»!</b>\n\n"
                 "Тепер ваші витрати та статистика — спільні. Почни з кнопки «💸 Витрата» "
-                "або просто напиши сюди щось на кшталт «150 такси».")
+                "або просто напиши сюди щось на кшталт «150 таксі».")
         return await message.answer(
             "❌ <b>Невірний або застарілий код запрошення.</b>\n"
             "Попроси адміна сім'ї згенерувати нове посилання.", parse_mode="HTML")
@@ -77,13 +77,13 @@ async def cmd_start(message: types.Message, state: FSMContext, command: Command)
                      f"\n📈 Дохід: <b>{stats['income']:,.0f} ₴</b>").replace(",", " ")
         if pending:
             text += f"\n🧹 Очікує розбору: <b>{pending}</b>"
-        text += "\n\n💡 Швидка дія: просто напиши «150 такси» — і я запишу витрату."
+        text += "\n\n💡 Швидка дія: просто напиши «150 таксі» — і я запишу витрату."
         return await _send_main_menu(message, user_info, text)
 
     text = (
         "🏦 <b>Привіт! Я — Bimi, твій фінансовий помічник.</b>\n\n"
         "Що я вмію:\n"
-        "▫️ <b>Швидкі витрати</b> — просто напиши «150 такси»\n"
+        "▫️ <b>Швидкі витрати</b> — просто напиши «150 таксі»\n"
         "▫️ <b>Monobank</b> — автоматично підтягую операції по картці\n"
         "▫️ <b>Чеки з фото</b> — сфоткай чек, я розпізнаю суму й товари\n"
         "▫️ <b>Сімейний бюджет</b> — спільні витрати з партнером/родиною\n"
@@ -109,7 +109,7 @@ async def saas_family_name(message: types.Message, state: FSMContext):
             f"🎉 <b>Простір «{family_name}» створено!</b>\n\n"
             f"🔗 <b>Запроси партнера/родину за посиланням:</b>\n<code>{invite_link}</code>\n\n"
             "<b>Що далі?</b>\n"
-            "1️⃣ Напиши «150 такси» — побачиш, як швидко додаються витрати\n"
+            "1️⃣ Напиши «150 таксі» — побачиш, як швидко додаються витрати\n"
             "2️⃣ Підключи Monobank у розділі «📂 Інше» → «💳 Монобанк»\n"
             "3️⃣ Сфоткай чек — я сам розпізнаю суму й товари\n"
             "4️⃣ Відкрий 📱 BimiApp для детальної статистики",
@@ -286,7 +286,7 @@ async def show_stats(message: types.Message, state: FSMContext):
     stats = await api_client.get_stats(active_family_id)
     if not stats:
         return await message.answer(
-            "📭 Поки немає даних.\nДодай першу витрату — просто напиши «150 такси».",
+            "📭 Поки немає даних.\nДодай першу витрату — просто напиши «150 таксі».",
             reply_markup=main_kb())
 
     users = await api_client._get(f"/families/{active_family_id}/users")

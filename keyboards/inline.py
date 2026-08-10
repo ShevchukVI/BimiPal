@@ -69,7 +69,7 @@ def manage_family_kb() -> InlineKeyboardMarkup:
 
 
 def quick_add_kb(cats, expanded: bool = False) -> InlineKeyboardMarkup:
-    """Категорії для швидкого додавання («150 такси»). callback — індекс у списку.
+    """Категорії для швидкого додавання («150 таксі»). callback — індекс у списку.
     Без expanded: максимум 6 категорій + кнопка «Всі категорії». Завжди є «➕ Нова категорія»."""
     shown = cats if expanded else cats[:6]
     kb_rows, row = [], []
