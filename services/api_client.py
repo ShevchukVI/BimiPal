@@ -97,6 +97,13 @@ class BimiAPIClient:
         if note: payload["note"] = note  # опис користувача — окремо від title (merchant)
         return await self._post(f"/transactions/by-mono/{mono_id}", payload, method="put")
 
+    async def update_transaction(self, tx_id: int, category_id: int = None, note: str = None):
+        """Оновлення транзакції за її id (для Inbox Zero pending, які можуть не мати mono_id)."""
+        payload = {}
+        if category_id is not None: payload["category_id"] = category_id
+        if note: payload["note"] = note
+        return await self._post(f"/transactions/{tx_id}", payload, method="put")
+
     async def delete_tx_by_mono(self, family_id: int, mono_id: str):
         txs = await self._get(f"/families/{family_id}/transactions?limit=100")
         if not txs: return False
