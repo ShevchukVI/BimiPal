@@ -18,6 +18,7 @@ from handlers import bot, dp
 from handlers.monobank import fetch_mono_balance
 from keyboards.inline import open_app_kb
 from keyboards.reply import clean_category_name, main_kb, other_kb, remove_kb
+from utils import esc
 
 
 class SaaSOnboarding(StatesGroup):
@@ -56,7 +57,7 @@ async def cmd_start(message: types.Message, state: FSMContext, command: Command)
         if family:
             return await _send_main_menu(
                 message, user_info,
-                f"🎉 <b>Ти приєднався до сім'ї «{family['name']}»!</b>\n\n"
+                f"🎉 <b>Ти приєднався до сім'ї «{esc(family['name'])}»!</b>\n\n"
                 "Тепер ваші витрати та статистика — спільні. Почни з кнопки «💸 Витрата» "
                 "або просто напиши сюди щось на кшталт «150 такси».")
         return await message.answer(
@@ -70,7 +71,7 @@ async def cmd_start(message: types.Message, state: FSMContext, command: Command)
             return await message.answer("❌ Немає активної сім'ї. Перевір /families")
         stats, pending = await asyncio.gather(
             api_client.get_stats(family_id), _pending_count(user_info))
-        text = f"👋 <b>З поверненням, {user_info['name']}!</b>\n"
+        text = f"👋 <b>З поверненням, {esc(user_info['name'])}!</b>\n"
         if stats and (stats["income"] or stats["expense"]):
             text += (f"\n📉 Витрати цього місяця: <b>{stats['expense']:,.0f} ₴</b>"
                      f"\n📈 Дохід: <b>{stats['income']:,.0f} ₴</b>").replace(",", " ")
@@ -131,7 +132,15 @@ async def go_back(message: types.Message, state: FSMContext):
 @dp.message(F.text == "📂 Інше", StateFilter("*"))
 async def show_other_menu(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("🧰 <b>Інструменти:</b>", reply_markup=other_kb(), parse_mode="HTML")
+    await message.answer(
+        "🧰 <b>Інструменти</b>\n\n"
+        "🧹 <b>Розібрати</b> — розподіли нерозібрані Monobank-витрати по категоріях\n"
+        "🏦 <b>Скарбнички</b> — цілі, на які відкладаєш гроші\n"
+        "👨👩👧 <b>Сім'я</b> — спільний бюджет, учасники, запрошення\n"
+        "💳 <b>Монобанк</b> — підключення, токен, баланс\n"
+        "📄 <b>Звіт</b> — PDF-звіт за поточний місяць\n\n"
+        "<i>Оберіть потрібний інструмент нижче:</i>",
+        reply_markup=other_kb(), parse_mode="HTML")
 
 
 def _is_admin(message: types.Message) -> bool:
@@ -286,7 +295,7 @@ async def show_stats(message: types.Message, state: FSMContext):
         for u in users:
             if u.get("has_mono_token") and u.get("tg_id"):
                 bal = await fetch_mono_balance(u["tg_id"])
-                mono_text += f"▫️ {u['name']}: {bal:,.0f} ₴\n"
+                mono_text += f"▫️ {esc(u['name'])}: {bal:,.0f} ₴\n"
 
     pending = await _pending_count(user_info)
     text = (
@@ -304,7 +313,7 @@ async def show_stats(message: types.Message, state: FSMContext):
         text += "🏆 <b>Топ витрат:</b>\n"
         for cat in stats['top_categories'][:5]:
             clean_name = clean_category_name(cat['name'])
-            text += f"▫️ {clean_name}: {cat['amount']:,.0f} ₴\n"
+            text += f"▫️ {esc(clean_name)}: {cat['amount']:,.0f} ₴\n"
     else:
         text += "🏆 Категорій з витратами цього місяця ще немає.\n"
 

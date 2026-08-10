@@ -17,6 +17,7 @@ from services.api_client import api_client
 from config import WEBHOOK_URL
 from handlers import bot, dp
 from keyboards.inline import after_categorize_kb, generate_mono_keyboard, next_unresolved_kb
+from utils import esc
 
 MONO_ACCOUNT_TO_USER = {}
 MONO_BALANCES_CACHE = {}
@@ -109,7 +110,7 @@ async def process_mono_webhook_background(data):
                 cats = [c for c in cats if "Очікує" not in c['name']]
                 try:
                     await bot.send_message(tg_id,
-                                           f"💳 <b>Нова витрата:</b>\n💰 {real_amount:.2f} ₴\n🛒 {desc}\n\n<i>Обери категорію:</i>",
+                                           f"💳 <b>Нова витрата:</b>\n💰 {real_amount:.2f} ₴\n🛒 {esc(desc)}\n\n<i>Обери категорію:</i>",
                                            reply_markup=generate_mono_keyboard(mono_id, cats), parse_mode="HTML")
                 except Exception:
                     pass
@@ -144,7 +145,7 @@ async def send_next_unresolved(chat_id, tg_id):
     cats = [c for c in cats if "Очікує" not in c['name']]
     await bot.send_message(chat_id,
                            f"⏳ <b>Нерозібраних: {len(unresolved)}</b>\n"
-                           f"📅 {tx['date']}\n💰 {tx['amount']} ₴\n🛒 {tx['title']}\n\n<i>Обери категорію:</i>",
+                           f"📅 {tx['date']}\n💰 {tx['amount']} ₴\n🛒 {esc(tx['title'])}\n\n<i>Обери категорію:</i>",
                            reply_markup=generate_mono_keyboard(tx["mono_id"], cats), parse_mode="HTML")
 
 
@@ -204,9 +205,8 @@ async def mono_save_desc(message: types.Message, state: FSMContext):
     data = await state.get_data()
     mono_id, msg_id, orig_text = data.get('mono_id'), data.get('msg_id'), data.get('orig_text', '')
 
-    new_title = f"{orig_text.split('🛒')[1].split('Обери')[0].strip()} | {message.text}"
-
-    if await api_client.update_tx_by_mono(mono_id, note=new_title):
+    # P0-5: коментар користувача зберігаємо в note, а не перезаписуємо title (merchant).
+    if await api_client.update_tx_by_mono(mono_id, note=message.text.strip()):
         await message.answer("✅ Твій коментар успішно додано!", reply_markup=next_unresolved_kb())
         try:
             await bot.edit_message_text(
