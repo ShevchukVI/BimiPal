@@ -93,27 +93,35 @@ async def process_mono_webhook_background(data):
             desc += f" ({statement.get('comment')})"
 
         tg_id = MONO_ACCOUNT_TO_USER.get(acc_id)
-        if tg_id and amount < 0:
-            real_amount = abs(amount)
-            user_info = await api_client.get_me(tg_id)
-            if not user_info:
-                return
+        if not tg_id or amount == 0:
+            return
+        is_expense = amount < 0
+        real_amount = abs(amount)
+        t_type = "Витрати" if is_expense else "Поповнення"
+        cat_type = "expense" if is_expense else "income"
+        icon = "📉" if is_expense else "📈"
 
-            cats = await api_client.get_categories(user_info["current_active_family_id"])
-            pending_cat = next((c['id'] for c in cats if "Очікує" in c['name']), None)
-            if not pending_cat:
-                return
+        user_info = await api_client.get_me(tg_id)
+        if not user_info:
+            return
 
-            res = await api_client.add_transaction(user_info["current_active_family_id"], user_info["id"], pending_cat, real_amount,
-                                                   "Витрати", f"❓ {desc}", "Монобанк", mono_id)
-            if res:
-                cats = [c for c in cats if "Очікує" not in c['name']]
-                try:
-                    await bot.send_message(tg_id,
-                                           f"💳 <b>Нова витрата:</b>\n💰 {real_amount:.2f} ₴\n🛒 {esc(desc)}\n\n<i>Обери категорію:</i>",
-                                           reply_markup=generate_mono_keyboard(res["id"], cats), parse_mode="HTML")
-                except Exception:
-                    pass
+        all_cats = await api_client.get_categories(user_info["current_active_family_id"])
+        pending_cat = next((c['id'] for c in all_cats if "Очікує" in c['name']), None)
+        if not pending_cat:
+            return
+
+        res = await api_client.add_transaction(user_info["current_active_family_id"], user_info["id"], pending_cat, real_amount,
+                                               t_type, f"❓ {desc}", "Монобанк", mono_id)
+        if res:
+            # Категорії для клавіатури — тільки потрібного типу (витрати/доходи)
+            cats = [c for c in all_cats if c['type'] == cat_type and "Очікує" not in c['name']]
+            try:
+                await bot.send_message(tg_id,
+                                       f"💳 <b>Нова {'витрата' if is_expense else 'виплата'}:</b>\n"
+                                       f"{icon} {real_amount:.2f} ₴\n🛒 {esc(desc)}\n\n<i>Обери категорію:</i>",
+                                       reply_markup=generate_mono_keyboard(res["id"], cats), parse_mode="HTML")
+            except Exception:
+                pass
 
 
 async def mono_webhook_get(request):
@@ -141,11 +149,13 @@ async def send_next_unresolved(chat_id, tg_id):
         return await bot.send_message(chat_id, "🎉 <b>Все чисто!</b> Нерозібраних транзакцій немає.", parse_mode="HTML")
 
     tx = unresolved[0]
-    cats = await api_client.get_categories(user_info["current_active_family_id"], "expense")
+    cat_type = "income" if tx['type'] == "Поповнення" else "expense"
+    cats = await api_client.get_categories(user_info["current_active_family_id"], cat_type)
     cats = [c for c in cats if "Очікує" not in c['name']]
+    sign = "+" if tx['type'] == "Поповнення" else ""
     await bot.send_message(chat_id,
                            f"⏳ <b>Нерозібраних: {len(unresolved)}</b>\n"
-                           f"📅 {tx['date']}\n💰 {tx['amount']} ₴\n🛒 {esc(tx['title'])}\n\n<i>Обери категорію:</i>",
+                           f"📅 {tx['date']}\n💰 {sign}{tx['amount']} ₴\n🛒 {esc(tx['title'])}\n\n<i>Обери категорію:</i>",
                            reply_markup=generate_mono_keyboard(tx["id"], cats), parse_mode="HTML")
 
 
