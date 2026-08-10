@@ -305,6 +305,9 @@ async def show_stats(message: types.Message, state: FSMContext):
         f"💰 Залишок: <b>{stats['balance']:,.0f} ₴</b>\n"
         f"➖➖➖➖➖➖\n"
     )
+    cash = stats.get("balances", {}).get("Готівка")
+    if cash is not None:
+        text += f"💵 <b>Готівка (баланс):</b> {cash:,.0f} ₴\n➖➖➖➖➖➖\n"
     if mono_text:
         text += f"💳 <b>Баланс Monobank:</b>\n{mono_text}➖➖➖➖➖➖\n"
     if pending:
