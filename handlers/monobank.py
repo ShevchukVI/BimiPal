@@ -28,11 +28,18 @@ class MonoCommentForm(StatesGroup):
 
 
 async def _load_accounts_from_backend():
-    """Завантажує banking-аккаунти з backend при старті."""
+    """Завантажує banking-аккаунти з backend: external_account_id → tg_id.
+    /banking/accounts повертає user_id (DB), тому з'єднуємо з /system/mono-tokens
+    (user_id → tg_id), щоб вебхуки могли звертатися до /auth/me?tg_id=..."""
     accounts = await api_client._get("/banking/accounts")
+    tokens = await api_client._get("/system/mono-tokens")
+    tg_by_user = {t["user_id"]: t["tg_id"] for t in (tokens or [])}
     if accounts:
+        MONO_ACCOUNT_TO_USER.clear()
         for a in accounts:
-            MONO_ACCOUNT_TO_USER[a["external_account_id"]] = a["user_id"]
+            tg_id = tg_by_user.get(a["user_id"])
+            if tg_id:
+                MONO_ACCOUNT_TO_USER[a["external_account_id"]] = tg_id
 
 
 # ================= МОНОБАНК: НАЛАШТУВАННЯ ТА ВЕБХУКИ =================
@@ -46,13 +53,10 @@ async def setup_monobank():
         logger.warning("No Monobank tokens found — webhooks NOT registered")
         return
 
-    # Оновлюємо локальний mapping з бази
-    accounts = await api_client._get("/banking/accounts")
-    if accounts:
-        MONO_ACCOUNT_TO_USER.clear()
-        for a in accounts:
-            MONO_ACCOUNT_TO_USER[a["external_account_id"]] = a["user_id"]
-        logger.info(f"Loaded {len(accounts)} bank accounts from backend")
+    # Оновлюємо локальний mapping з бази (external_account_id → tg_id)
+    await _load_accounts_from_backend()
+    if MONO_ACCOUNT_TO_USER:
+        logger.info(f"Loaded {len(MONO_ACCOUNT_TO_USER)} bank accounts from backend")
     else:
         logger.warning("No bank accounts returned from backend")
 
