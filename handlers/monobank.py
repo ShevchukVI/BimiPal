@@ -17,6 +17,7 @@ from services.api_client import api_client
 from config import WEBHOOK_URL
 from handlers import bot, dp
 from keyboards.inline import after_categorize_kb, generate_mono_keyboard, next_unresolved_kb
+from utils import esc
 
 MONO_ACCOUNT_TO_USER = {}
 MONO_BALANCES_CACHE = {}
@@ -106,10 +107,11 @@ async def process_mono_webhook_background(data):
             res = await api_client.add_transaction(user_info["current_active_family_id"], user_info["id"], pending_cat, real_amount,
                                                    "Витрати", f"❓ {desc}", "Монобанк", mono_id)
             if res:
+                cats = [c for c in cats if "Очікує" not in c['name']]
                 try:
                     await bot.send_message(tg_id,
-                                           f"💳 <b>Нова витрата:</b>\n💰 {real_amount:.2f} ₴\n🛒 {desc}\n\n<i>Обери категорію:</i>",
-                                           reply_markup=generate_mono_keyboard(mono_id, cats), parse_mode="HTML")
+                                           f"💳 <b>Нова витрата:</b>\n💰 {real_amount:.2f} ₴\n🛒 {esc(desc)}\n\n<i>Обери категорію:</i>",
+                                           reply_markup=generate_mono_keyboard(res["id"], cats), parse_mode="HTML")
                 except Exception:
                     pass
 
@@ -140,12 +142,14 @@ async def send_next_unresolved(chat_id, tg_id):
 
     tx = unresolved[0]
     cats = await api_client.get_categories(user_info["current_active_family_id"], "expense")
+    cats = [c for c in cats if "Очікує" not in c['name']]
     await bot.send_message(chat_id,
-                           f"⏳ <b>Нерозібрана витрата:</b>\n📅 {tx['date']}\n💰 {tx['amount']} ₴\n🛒 {tx['title']}\n\n<i>Обери категорію:</i>",
-                           reply_markup=generate_mono_keyboard(tx["mono_id"], cats), parse_mode="HTML")
+                           f"⏳ <b>Нерозібраних: {len(unresolved)}</b>\n"
+                           f"📅 {tx['date']}\n💰 {tx['amount']} ₴\n🛒 {esc(tx['title'])}\n\n<i>Обери категорію:</i>",
+                           reply_markup=generate_mono_keyboard(tx["id"], cats), parse_mode="HTML")
 
 
-@dp.message(F.text == "🧹 Розібрати 'Очікує'", StateFilter("*"))
+@dp.message(F.text.startswith("🧹 Розібрати"), StateFilter("*"))
 async def trigger_inbox_zero(message: types.Message):
     await send_next_unresolved(message.chat.id, message.from_user.id)
 
@@ -161,23 +165,27 @@ async def trigger_next_unresolved_btn(call: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("mcat:"))
 async def mono_categorize(call: types.CallbackQuery):
-    _, mono_id, cat_id = call.data.split(":", 2)
+    try:
+        _, tx_id, cat_id = call.data.split(":", 2)
+        tx_id, cat_id = int(tx_id), int(cat_id)
+    except (ValueError, IndexError):
+        return await call.message.edit_text("❌ Помилка розбору callback.")
     user_info = await api_client.get_me(call.from_user.id)
     cats = await api_client.get_categories(user_info["current_active_family_id"])
-    cat = next((c for c in cats if str(c['id']) == cat_id), None)
+    cat = next((c for c in cats if c['id'] == cat_id), None)
     if not cat:
         return await call.message.edit_text("❌ Категорію не знайдено.")
 
-    await call.message.edit_text(f"⏳ <i>Зберігаю в {cat['name']}...</i>", parse_mode="HTML")
+    await call.message.edit_text(f"⏳ <i>Зберігаю в {esc(cat['name'])}...</i>", parse_mode="HTML")
 
-    if await api_client.update_tx_by_mono(mono_id, category_id=int(cat_id)):
+    if await api_client.update_transaction(tx_id, category_id=cat_id):
         orig_text = call.message.text.replace("Обери категорію:", "").replace("Нерозібрана витрата:",
                                                                               "Нова витрата:").strip()
         await call.message.edit_text(
-            f"{orig_text}\n\n✅ <b>Записано в:</b> {cat['name']}\n\n<i>Бажаєш додати деталі покупки?</i>",
-            reply_markup=after_categorize_kb(mono_id), parse_mode="HTML")
+            f"{orig_text}\n\n✅ <b>Записано в:</b> {esc(cat['name'])}\n\n<i>Бажаєш додати деталі покупки?</i>",
+            reply_markup=after_categorize_kb(tx_id), parse_mode="HTML")
     else:
-        await call.message.edit_text("❌ Помилка оновлення таблиці.")
+        await call.message.edit_text("❌ Помилка оновлення транзакції. Спробуй ще раз.")
 
 
 @dp.callback_query(F.data == "mdon")
@@ -189,7 +197,11 @@ async def mono_done(call: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("mdsc:"))
 async def mono_ask_desc(call: types.CallbackQuery, state: FSMContext):
-    await state.update_data(mono_id=call.data.split(":")[1], msg_id=call.message.message_id,
+    try:
+        tx_id = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        return await call.answer("Помилка", show_alert=True)
+    await state.update_data(tx_id=tx_id, msg_id=call.message.message_id,
                             orig_text=call.message.text)
     await state.set_state(MonoCommentForm.text)
     await bot.send_message(call.message.chat.id, "✍️ Напиши свій коментар до цієї покупки текстом сюди:")
@@ -199,11 +211,10 @@ async def mono_ask_desc(call: types.CallbackQuery, state: FSMContext):
 @dp.message(MonoCommentForm.text)
 async def mono_save_desc(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    mono_id, msg_id, orig_text = data.get('mono_id'), data.get('msg_id'), data.get('orig_text', '')
+    tx_id, msg_id, orig_text = data.get('tx_id'), data.get('msg_id'), data.get('orig_text', '')
 
-    new_title = f"{orig_text.split('🛒')[1].split('Обери')[0].strip()} | {message.text}"
-
-    if await api_client.update_tx_by_mono(mono_id, note=new_title):
+    # P0-5: коментар користувача зберігаємо в note, а не перезаписуємо title (merchant).
+    if tx_id and await api_client.update_transaction(tx_id, note=message.text.strip()):
         await message.answer("✅ Твій коментар успішно додано!", reply_markup=next_unresolved_kb())
         try:
             await bot.edit_message_text(
@@ -218,9 +229,11 @@ async def mono_save_desc(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("mdel:"))
 async def mono_delete_tx(call: types.CallbackQuery):
-    _, mono_id = call.data.split(":", 1)
-    user_info = await api_client.get_me(call.from_user.id)
-    if await api_client.delete_tx_by_mono(user_info["current_active_family_id"], mono_id):
+    try:
+        tx_id = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        return await call.answer("Помилка", show_alert=True)
+    if await api_client.delete_transaction(tx_id):
         await call.message.edit_text("🗑 Цю транзакцію стерто.", reply_markup=next_unresolved_kb())
     else:
         await call.message.edit_text("❌ Помилка видалення.")

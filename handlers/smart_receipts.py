@@ -80,13 +80,13 @@ async def receipt_save(call: types.CallbackQuery, state: FSMContext):
     shop = parsed.get("shop_name", "Магазин")
     total = parsed.get("total_amount", 0)
     items = parsed.get("items", []) or []
-    title = f"🧾 {shop}: " + ", ".join(str(i) for i in items[:6])
+    note = ", ".join(str(i) for i in items[:6]) if items else ""
 
     res = await api_client.add_transaction(user_info["current_active_family_id"], user_info["id"], pending_cat, total,
-                                           "Витрати", title, "Готівка")
+                                           "Витрати", shop, "Готівка", note=note)
     if res:
         await call.message.edit_text(
-            f"✅ <b>Чек записано ({total:.2f} ₴)</b>\n\nТепер розбери його по категоріях через Inbox Zero.",
+            f"✅ <b>Чек записано ({total:.2f} ₴)</b>\n\nОбери йому категорію через «🧹 Розібрати» в головному меню.",
             parse_mode="HTML")
     else:
         await call.message.edit_text("❌ Помилка збереження чека.")

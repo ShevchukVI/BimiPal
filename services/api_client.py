@@ -73,20 +73,36 @@ class BimiAPIClient:
         if cat_type: return [c for c in cats if c['type'] == cat_type]
         return cats
 
+    async def create_category(self, family_id: int, name: str, cat_type: str = "expense",
+                              icon: str = "🗂️", color: str = "#7f8c8d"):
+        return await self._post("/categories",
+                                {"family_id": family_id, "icon": icon, "name": name,
+                                 "color": color, "type": cat_type},
+                                headers=_headers(x_family_id=family_id))
+
     async def add_transaction(self, family_id, user_id, cat_id, amount, t_type, title, account="Готівка", mono_id=None,
-                              date_str=None):
+                              date_str=None, note=None):
         payload = {
             "family_id": family_id, "user_id": user_id, "category_id": cat_id,
             "amount": float(amount), "type": t_type, "title": title,
             "account": account, "mono_id": mono_id, "date": date_str or datetime.now().strftime("%Y-%m-%d")
         }
+        if note:
+            payload["note"] = note
         return await self._post("/transactions", payload, headers=_headers(x_family_id=family_id))
 
     async def update_tx_by_mono(self, mono_id: str, category_id: int = None, note: str = None):
         payload = {}
         if category_id: payload["category_id"] = category_id
-        if note: payload["title"] = note
+        if note: payload["note"] = note  # опис користувача — окремо від title (merchant)
         return await self._post(f"/transactions/by-mono/{mono_id}", payload, method="put")
+
+    async def update_transaction(self, tx_id: int, category_id: int = None, note: str = None):
+        """Оновлення транзакції за її id (для Inbox Zero pending, які можуть не мати mono_id)."""
+        payload = {}
+        if category_id is not None: payload["category_id"] = category_id
+        if note: payload["note"] = note
+        return await self._post(f"/transactions/{tx_id}", payload, method="put")
 
     async def delete_tx_by_mono(self, family_id: int, mono_id: str):
         txs = await self._get(f"/families/{family_id}/transactions?limit=100")
@@ -200,6 +216,8 @@ class BimiAPIClient:
 
         for t in txs:
             try:
+                if t['type'] == "Переказ":
+                    continue  # перекази між джерелами — не дохід/витрата у звітах
                 d = datetime.strptime(t['date'], "%Y-%m-%d")
                 if d.year == year and d.month == month:
                     amt = t['amount']
@@ -222,16 +240,14 @@ class BimiAPIClient:
         for c in sorted_cats: c['top_txs'] = sorted(c['txs'], key=lambda x: x['amount'], reverse=True)[:3]
         return {"income": income, "expense": expense, "balance": income - expense, "grouped_categories": sorted_cats}
 
-    async def add_transfer(self, family_id: int, user_id: int, amount: float, note: str, from_who: str, to_who: str):
-        cats = await self.get_categories(family_id)
-        trans_cat = next((c['id'] for c in cats if "Переказ" in c['name']), None)
-        if not trans_cat: return False
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        await self.add_transaction(family_id, user_id, trans_cat, amount, "Витрати", f"Переказ -> {to_who} ({note})",
-                                   date_str=date_str)
-        await self.add_transaction(family_id, user_id, trans_cat, amount, "Поповнення",
-                                   f"Отримано <- {from_who} ({note})", date_str=date_str)
-        return True
+    async def create_transfer(self, family_id: int, user_id: int, amount: float,
+                              from_account: str, to_account: str):
+        """Переказ між джерелами (Cash ↔ Bank). Пара зігнованих 'Переказ'-транзакцій,
+        не впливає на доходи/витрати."""
+        return await self._post("/transactions/transfer", {
+            "family_id": family_id, "user_id": user_id, "amount": float(amount),
+            "from_account": from_account, "to_account": to_account,
+        }, headers=_headers(x_family_id=family_id))
 
     # --- SAAS ONBOARDING ---
     async def register_saas_user(self, tg_id: int, name: str, family_name: str, mono_token: str = None):
