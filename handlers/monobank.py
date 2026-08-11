@@ -173,6 +173,25 @@ async def trigger_next_unresolved_btn(call: types.CallbackQuery):
     await send_next_unresolved(call.message.chat.id, call.from_user.id)
 
 
+@dp.callback_query(F.data.startswith("mall:"))
+async def mono_show_all_cats(call: types.CallbackQuery):
+    """Розгорнути повний список категорій для розбору транзакції."""
+    try:
+        tx_id = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        return await call.answer("Помилка", show_alert=True)
+    user_info = await api_client.get_me(call.from_user.id)
+    if not user_info:
+        return await call.answer("Акаунт не знайдено", show_alert=True)
+    cats = await api_client.get_categories(user_info["current_active_family_id"])
+    cats = [c for c in cats if "Очікує" not in c['name']]
+    try:
+        await call.message.edit_reply_markup(reply_markup=generate_mono_keyboard(tx_id, cats, expanded=True))
+    except Exception:
+        pass
+    await call.answer()
+
+
 @dp.callback_query(F.data.startswith("mcat:"))
 async def mono_categorize(call: types.CallbackQuery):
     try:

@@ -81,11 +81,12 @@ class BimiAPIClient:
                                 headers=_headers(x_family_id=family_id))
 
     async def add_transaction(self, family_id, user_id, cat_id, amount, t_type, title, account="Готівка", mono_id=None,
-                              date_str=None, note=None):
+                              date_str=None, note=None, currency="UAH"):
         payload = {
             "family_id": family_id, "user_id": user_id, "category_id": cat_id,
             "amount": float(amount), "type": t_type, "title": title,
-            "account": account, "mono_id": mono_id, "date": date_str or datetime.now().strftime("%Y-%m-%d")
+            "account": account, "mono_id": mono_id, "date": date_str or datetime.now().strftime("%Y-%m-%d"),
+            "currency": currency or "UAH",
         }
         if note:
             payload["note"] = note
@@ -240,7 +241,9 @@ class BimiAPIClient:
                         cd['total'] += amt
                         cd['txs'].append({
                             "date": d.strftime("%d.%m.%Y"), "amount": amt,
-                            "desc": t['title'], "who": "", "currency": cur,
+                            "desc": t['title'],
+                            "who": t.get('user_name') or "",
+                            "currency": cur,
                         })
             except Exception:
                 pass

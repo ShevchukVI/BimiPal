@@ -22,7 +22,13 @@ from utils import esc, fmt_amount
 # «100 000 зп» (роздільник тисяч), «250 кава готівкою».
 # ВІДМОВА: «цибуля 200 г, морква 500 г» — це опис (грами), а не транзакція.
 
-CURRENCY_WORDS = {"грн", "гривень", "гривні", "гривня", "гривням", "гривнею", "гривен", "uah", "₴"}
+# Валюта: слово-маркер після суми → код валюти (для quick-add «150 usd», «100 $» тощо)
+CURRENCY_WORDS = {
+    "грн": "UAH", "гривень": "UAH", "гривні": "UAH", "гривня": "UAH",
+    "гривням": "UAH", "гривнею": "UAH", "гривен": "UAH", "uah": "UAH", "₴": "UAH",
+    "usd": "USD", "дол": "USD", "долар": "USD", "долара": "USD", "$": "USD",
+    "eur": "EUR", "євро": "EUR", "евро": "EUR", "€": "EUR",
+}
 UNIT_WORDS = {"г", "грам", "грамм", "кг", "мл", "л", "літр", "літри", "літрів", "см", "м",
               "метр", "метри", "шт", "штук", "штуки", "уп", "упаковка", "пачка", "пачки",
               "хв", "хвилин", "км", "сек"}
@@ -102,11 +108,19 @@ def parse_quick_add(text: str):
         skip.add(idx - 1)
     title = " ".join(t for i, t in enumerate(tokens) if i not in skip).strip(' ,.-—')
 
+    # 5) Валюта: маркер одразу після суми («150 usd», «100 $»)
+    currency = "UAH"
+    if idx + 1 < len(tokens):
+        nxt = _clean_word(tokens[idx + 1])
+        if nxt in CURRENCY_WORDS:
+            currency = CURRENCY_WORDS[nxt]
+
     return {
         "amount": amount,
         "title": title,
         "t_type": "Поповнення" if sign == "+" else "Витрати",
         "account": "Готівка",
+        "currency": currency,
     }
 
 
@@ -150,14 +164,16 @@ async def quick_add_start(message: types.Message, state: FSMContext):
 
     await state.update_data(amount=parsed["amount"], title=parsed["title"],
                             t_type=parsed["t_type"], account=parsed["account"],
+                            currency=parsed.get("currency", "UAH"),
                             family_id=family_id, user_id=user_info["id"],
                             cats=cats, cat_type=cat_type)
     await state.set_state(QuickAddForm.category)
 
     icon = "📈" if parsed["t_type"] == "Поповнення" else "📉"
     desc = f" — «{esc(parsed['title'])}»" if parsed["title"] else ""
+    sym = {"UAH": "₴", "USD": "$", "EUR": "€"}.get(parsed.get("currency", "UAH"), parsed.get("currency", "UAH"))
     await message.answer(
-        f"{icon} <b>{fmt_amount(parsed['amount'])} ₴</b>{desc}\nОбери категорію:",
+        f"{icon} <b>{fmt_amount(parsed['amount'])} {sym}</b>{desc}\nОбери категорію:",
         reply_markup=quick_add_kb(cats), parse_mode="HTML")
 
 
@@ -207,11 +223,13 @@ async def _save_quick(call: types.CallbackQuery, state: FSMContext, data: dict, 
     await bot.send_chat_action(call.message.chat.id, ChatAction.TYPING)
     await state.clear()
     title = data["title"] or cat["name"]
+    cur = data.get("currency", "UAH")
+    sym = {"UAH": "₴", "USD": "$", "EUR": "€"}.get(cur, cur)
     res = await api_client.add_transaction(data["family_id"], data["user_id"], cat["id"],
-                                           data["amount"], data["t_type"], title, data["account"])
+                                           data["amount"], data["t_type"], title, data["account"], currency=cur)
     if res:
         await call.message.edit_text(
-            f"✅ <b>{fmt_amount(data['amount'])} ₴</b> → {esc(cat['name'])}\n"
+            f"✅ <b>{fmt_amount(data['amount'])} {sym}</b> → {esc(cat['name'])}\n"
             f"📝 {esc(title)}",
             reply_markup=quick_add_undo_kb(res["id"]), parse_mode="HTML")
     else:
@@ -223,13 +241,15 @@ async def _save_quick_direct(message: types.Message, tmp_msg: types.Message,
     """Збереження після створення нової категорії (відповідь новим повідомленням)."""
     await state.clear()
     title = data["title"] or cat["name"]
+    cur = data.get("currency", "UAH")
+    sym = {"UAH": "₴", "USD": "$", "EUR": "€"}.get(cur, cur)
     res = await api_client.add_transaction(data["family_id"], data["user_id"], cat["id"],
-                                           data["amount"], data["t_type"], title, data["account"])
+                                           data["amount"], data["t_type"], title, data["account"], currency=cur)
     await tmp_msg.delete()
     if res:
         await message.answer(
             f"✅ Категорію «{esc(cat['name'])}» створено.\n"
-            f"<b>{fmt_amount(data['amount'])} ₴</b> → {esc(cat['name'])}\n📝 {esc(title)}",
+            f"<b>{fmt_amount(data['amount'])} {sym}</b> → {esc(cat['name'])}\n📝 {esc(title)}",
             reply_markup=quick_add_undo_kb(res["id"]), parse_mode="HTML")
     else:
         await message.answer("❌ Помилка збереження. Спробуй ще раз.")

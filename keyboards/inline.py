@@ -3,17 +3,21 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 
-def generate_mono_keyboard(tx_id, cats) -> InlineKeyboardMarkup:
+def generate_mono_keyboard(tx_id, cats, expanded: bool = False) -> InlineKeyboardMarkup:
     """Клавіатура розбору транзакції по категоріях (Inbox Zero).
-    Ключ — transaction id (не mono_id): pending можуть бути без mono_id (чеки, seed)."""
+    Ключ — transaction id (не mono_id). Показуємо максимум 8 категорій; якщо їх більше —
+    кнопка «➡️ Показати всі», яка розгортає повний список (expanded)."""
+    shown = cats if expanded else cats[:8]
     kb_rows, row = [], []
-    for c in cats[:8]:
+    for c in shown:
         row.append(InlineKeyboardButton(text=c['name'], callback_data=f"mcat:{tx_id}:{c['id']}"))
         if len(row) == 2:
             kb_rows.append(row)
             row = []
     if row:
         kb_rows.append(row)
+    if not expanded and len(cats) > 8:
+        kb_rows.append([InlineKeyboardButton(text=f"➡️ Показати всі ({len(cats)})", callback_data=f"mall:{tx_id}")])
     kb_rows.append([InlineKeyboardButton(text="⏳ На потім", callback_data=f"mltr:{tx_id}"),
                     InlineKeyboardButton(text="❌ Стерти", callback_data=f"mdel:{tx_id}")])
     return InlineKeyboardMarkup(inline_keyboard=kb_rows)
@@ -91,3 +95,14 @@ def quick_add_undo_kb(tx_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="↩️ Скасувати запис", callback_data=f"qu:{tx_id}")]
     ])
+
+
+CURRENCY_BTN = {"UAH": "₴ UAH", "USD": "$ USD", "EUR": "€ EUR"}
+
+
+def currency_kb() -> InlineKeyboardMarkup:
+    """Вибір валюти вручну (FSM додавання транзакції)."""
+    kb_rows = []
+    for cur, label in CURRENCY_BTN.items():
+        kb_rows.append([InlineKeyboardButton(text=label, callback_data=f"cur:{cur}")])
+    return InlineKeyboardMarkup(inline_keyboard=kb_rows)

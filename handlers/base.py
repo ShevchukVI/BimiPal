@@ -298,16 +298,31 @@ async def show_stats(message: types.Message, state: FSMContext):
                 mono_text += f"▫️ {esc(u['name'])}: {bal:,.0f} ₴\n"
 
     pending = await _pending_count(user_info)
-    text = (
-        f"📊 <b>Цей місяць</b>\n"
-        f"📈 Дохід: <b>{stats['income']:,.0f} ₴</b>\n"
-        f"📉 Витрати: <b>{stats['expense']:,.0f} ₴</b>\n"
-        f"💰 Залишок: <b>{stats['balance']:,.0f} ₴</b>\n"
-        f"➖➖➖➖➖➖\n"
-    )
-    cash = stats.get("balances", {}).get("Готівка")
-    if cash is not None:
-        text += f"💵 <b>Готівка (баланс):</b> {cash:,.0f} ₴\n➖➖➖➖➖➖\n"
+
+    # --- Місячні дохід/витрати по валютах (by_currency) ---
+    by_cur = stats.get("by_currency") or {}
+    # Fallback: якщо by_currency порожній — старі поля (UAH)
+    if not by_cur:
+        by_cur = {"UAH": {"income": stats.get("income", 0), "expense": stats.get("expense", 0)}}
+
+    def _money(v, cur):
+        sym = {"UAH": "₴", "USD": "$", "EUR": "€"}.get(cur, cur)
+        return f"{v:,.0f} {sym}".replace(",", " ")
+
+    text = f"📊 <b>Цей місяць</b>\n"
+    for cur, v in sorted(by_cur.items()):
+        text += (f"▫️ <b>{cur}</b>  📈 {_money(v.get('income', 0), cur)}"
+                 f"  📉 {_money(v.get('expense', 0), cur)}"
+                 f"  💰 {_money(v.get('income', 0) - v.get('expense', 0), cur)}\n")
+    text += f"➖➖➖➖➖➖\n"
+
+    # --- Готівка по валютах (cash_by_currency) ---
+    cash_cur = stats.get("cash_by_currency")
+    if cash_cur:
+        parts = " | ".join(f"{_money(c['balance'], c['currency'])}" for c in cash_cur)
+        text += f"💵 <b>Готівка:</b> {parts}\n➖➖➖➖➖➖\n"
+    elif stats.get("balances", {}).get("Готівка") is not None:
+        text += f"💵 <b>Готівка:</b> {_money(stats['balances']['Готівка'], 'UAH')}\n➖➖➖➖➖➖\n"
     if mono_text:
         text += f"💳 <b>Баланс Monobank:</b>\n{mono_text}➖➖➖➖➖➖\n"
     if pending:

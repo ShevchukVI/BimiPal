@@ -26,9 +26,25 @@ except:
     FONT_NAME = 'Helvetica'
 
 
+# Емодзі та інші символи, яких немає в PDF-шрифті — прибираємо перед малюванням.
+_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "\U0001F1E6-\U0001F1FF"
+    "\U00002B00-\U00002BFF"
+    "\U0000FE00-\U0000FE0F"
+    "\U00002190-\U000021FF"
+    "\U00002300-\U000023FF]"
+)
+
+
 def clean_text(text):
     if not text: return ""
-    return re.sub(r'[^\w\s,.-]', '', str(text)).strip()
+    # 1) прибираємо емодзі
+    t = _EMOJI_RE.sub('', str(text))
+    # 2) прибираємо все, що не буква/цифра/пробіл/пунктуація, але ЗБЕРІГАЄМО апостроф
+    t = re.sub(r"[^\w\s,.\-']", '', t)
+    return t.strip()
 
 
 def draw_header(c, width, height, month_name, year):

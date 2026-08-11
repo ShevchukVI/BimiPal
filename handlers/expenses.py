@@ -11,11 +11,12 @@ from aiogram.fsm.state import State, StatesGroup
 from services.api_client import api_client
 from handlers import bot, dp
 from handlers.base import go_back
+from keyboards.inline import currency_kb
 from keyboards.reply import categories_kb, clean_category_name, description_kb, main_kb, remove_kb
 
 
 class FinanceForm(StatesGroup):
-    category_id, amount, description = State(), State(), State()
+    category_id, amount, currency, description = State(), State(), State(), State()
 
 
 # "💸 Витрата (Готівка)" — legacy-текст старої клавіатури, лишаємо для сумісності.
@@ -73,8 +74,25 @@ async def add_tx_amount(message: types.Message, state: FSMContext):
     except (ValueError, AttributeError):
         return await message.answer("🔢 Введи додатне число, наприклад: 150 або 99.50")
     await state.update_data(amount=val)
+    await state.set_state(FinanceForm.currency)
+    await message.answer("💱 Обери валюту:", reply_markup=currency_kb())
+
+
+@dp.callback_query(F.data.startswith("cur:"), StateFilter(FinanceForm.currency))
+async def add_tx_currency(call: types.CallbackQuery, state: FSMContext):
+    currency = call.data.split(":", 1)[1]
+    if currency not in ("UAH", "USD", "EUR"):
+        return await call.answer("Невідома валюта", show_alert=True)
+    await state.update_data(currency=currency)
     await state.set_state(FinanceForm.description)
-    await message.answer("✍️ Коментар (що купили) — або пропусти:", reply_markup=description_kb())
+    await call.message.edit_text(f"💱 Валюта: {currency}\n\n✍️ Коментар (що купили) — або пропусти:",
+                                 reply_markup=description_kb())
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("cur:"), StateFilter("*"))
+async def add_tx_currency_stale(call: types.CallbackQuery):
+    await call.answer("Ця сесія застаріла. Почни /start заново 🙂", show_alert=True)
 
 
 @dp.message(StateFilter(FinanceForm.description))
@@ -85,14 +103,16 @@ async def add_tx_save(message: types.Message, state: FSMContext):
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     date_now = datetime.now().strftime("%Y-%m-%d")
     title = data['category_name'] if message.text == "⏭ Пропустити" else message.text
+    currency = data.get('currency') or 'UAH'
 
     res = await api_client.add_transaction(data['family_id'], data['user_id'], data['category_id'], data['amount'],
-                                           data['t_type'], title, "Готівка", None, date_now)
+                                           data['t_type'], title, "Готівка", None, date_now, currency=currency)
     await state.clear()
     if res:
         icon = "📈" if data['t_type'] == "Поповнення" else "📉"
+        sym = {"UAH": "₴", "USD": "$", "EUR": "€"}.get(currency, currency)
         await message.answer(
-            f"✅ {icon} <b>{data['amount']:,.2f} ₴</b> — {data['category_name']}".replace(",", " "),
+            f"✅ {icon} <b>{data['amount']:,.2f} {sym}</b> — {data['category_name']}".replace(",", " "),
             reply_markup=main_kb(), parse_mode="HTML")
     else:
         await message.answer("❌ Помилка збереження. Спробуй ще раз.", reply_markup=main_kb())
