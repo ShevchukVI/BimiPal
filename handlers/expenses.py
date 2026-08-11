@@ -85,9 +85,19 @@ async def add_tx_currency(call: types.CallbackQuery, state: FSMContext):
         return await call.answer("Невідома валюта", show_alert=True)
     await state.update_data(currency=currency)
     await state.set_state(FinanceForm.description)
-    await call.message.edit_text(f"💱 Валюта: {currency}\n\n✍️ Коментар (що купили) — або пропусти:",
-                                 reply_markup=description_kb())
+    sym = {"UAH": "₴", "USD": "$", "EUR": "€"}.get(currency, currency)
+    # Обов'язково викликаємо call.answer() ПЕРШИМ, щоб зняти "loading" з кнопки.
     await call.answer()
+    # Редагуємо inline-повідомлення БЕЗ reply-клавіатури (edit_text не приймає
+    # ReplyKeyboardMarkup — це спричиняло "заморожену" кнопку).
+    try:
+        await call.message.edit_text(f"💱 Валюта: <b>{currency}</b> ({sym})")
+    except Exception:
+        pass
+    # Окремe повідомлення з reply-клавіатурою для коментаря.
+    await bot.send_message(call.message.chat.id,
+                           "✍️ Коментар (що купили) — або пропусти:",
+                           reply_markup=description_kb())
 
 
 @dp.callback_query(F.data.startswith("cur:"), StateFilter("*"))
