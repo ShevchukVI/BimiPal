@@ -36,12 +36,12 @@ class BimiAPIClient:
             logger.error(f"API GET {url} EXCEPTION {type(e).__name__}: {e}")
         return None
 
-    async def _post(self, endpoint, payload, method="post", headers=None):
+    async def _post(self, endpoint, payload, method="post", headers=None, timeout=5):
         url = f"{self.base_url}{endpoint}"
         try:
             async with aiohttp.ClientSession() as session:
                 req = getattr(session, method)
-                async with req(url, json=payload, headers=headers or _API_HEADERS, timeout=5) as resp:
+                async with req(url, json=payload, headers=headers or _API_HEADERS, timeout=timeout) as resp:
                     if resp.status in (200, 201):
                         return await resp.json()
                     body = (await resp.text())[:200]
@@ -62,6 +62,17 @@ class BimiAPIClient:
         except Exception as e:
             logger.error(f"API DELETE {url} EXCEPTION {type(e).__name__}: {e}")
         return False
+
+    # --- HOUSING («Житло»): reminders & outage sync are computed by the backend ---
+    async def get_housing_reminders(self):
+        return await self._get("/system/housing/reminders") or []
+
+    async def ack_housing_reminders(self, items: list):
+        return await self._post("/system/housing/reminders/ack", {"items": items})
+
+    async def sync_power_outages(self):
+        # first run backfills the svitlobot channel history (several pages) — allow time
+        return await self._post("/system/housing/outages/sync", {}, timeout=90)
 
     # --- CORE METHODS ---
     async def get_me(self, tg_id: int):
