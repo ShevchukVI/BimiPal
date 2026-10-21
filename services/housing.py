@@ -1,4 +1,4 @@
-# «Житло»: розсилка нагадувань (показники, оплати, оренда) і синхронізація відключень світла.
+# Нагадування Bimi: «Житло» (показники, оплати, оренда), кредити й розстрочки; синхронізація відключень світла.
 # Бот — тонкий клієнт: що і кому нагадати, вирішує бекенд (/system/housing/*).
 import logging
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
@@ -20,8 +20,11 @@ def app_url(tab: str) -> str:
     return urlunparse(u._replace(query=urlencode(q)))
 
 
+LABELS = {"readings": "📸 Внести показники", "housing": "🏡 Відкрити «Житло»", "payments": "💳 Кредити й підписки"}
+
+
 def housing_kb(tab: str) -> InlineKeyboardMarkup:
-    label = "📸 Внести показники" if tab == "readings" else "🏡 Відкрити «Житло»"
+    label = LABELS.get(tab, LABELS["housing"])
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label, web_app=WebAppInfo(url=app_url(tab)))]])
 
 
@@ -29,7 +32,7 @@ async def send_housing_reminders(bot: Bot):
     items = await api_client.get_housing_reminders()
     acks = []
     for it in items:
-        tab = "readings" if any(k.startswith("readings:") for k in it.get("keys", [])) else "housing"
+        tab = it.get("tab") or ("readings" if any(k.startswith("readings:") for k in it.get("keys", [])) else "housing")
         delivered = False
         for tg_id in it.get("tg_ids", []):
             try:
