@@ -20,7 +20,8 @@ def app_url(tab: str) -> str:
     return urlunparse(u._replace(query=urlencode(q)))
 
 
-LABELS = {"readings": "📸 Внести показники", "housing": "🏡 Відкрити «Житло»", "payments": "💳 Кредити й підписки"}
+LABELS = {"readings": "📸 Внести показники", "housing": "🏡 Відкрити «Житло»", "payments": "💳 Кредити й підписки",
+          "analytics": "📊 Аналітика"}
 
 
 def housing_kb(tab: str) -> InlineKeyboardMarkup:
