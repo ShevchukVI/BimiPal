@@ -70,6 +70,10 @@ class BimiAPIClient:
     async def ack_housing_reminders(self, items: list):
         return await self._post("/system/housing/reminders/ack", {"items": items})
 
+    async def sync_bank_jars(self):
+        # Monobank «банки» → goals in Bimi; transfers to own jars are not spending
+        return await self._post("/system/housing/jars/sync", {}, timeout=90)
+
     async def sync_power_outages(self):
         # first run backfills the svitlobot channel history (several pages) — allow time
         return await self._post("/system/housing/outages/sync", {}, timeout=90)

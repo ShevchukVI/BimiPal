@@ -11,7 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from handlers import bot, dp
 from handlers.monobank import mono_webhook_get, mono_webhook_post, setup_monobank
 from services.backups import run_daily_backup
-from services.housing import send_housing_reminders, sync_power_outages
+from services.housing import send_housing_reminders, sync_bank_jars, sync_power_outages
 
 logging.basicConfig(level=logging.INFO)
 
@@ -39,6 +39,7 @@ async def on_startup():
     scheduler.add_job(scheduled_backup, 'cron', hour=3, minute=0)
     scheduler.add_job(scheduled_housing_reminders, 'cron', hour=10, minute=0, timezone='Europe/Kyiv')
     scheduler.add_job(sync_power_outages, 'interval', minutes=10, max_instances=1, coalesce=True)
+    scheduler.add_job(sync_bank_jars, 'interval', minutes=10, max_instances=1, coalesce=True)
     scheduler.start()
     await bot.delete_webhook(drop_pending_updates=True)
 

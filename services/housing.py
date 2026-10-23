@@ -49,6 +49,13 @@ async def send_housing_reminders(bot: Bot):
         logger.info("housing reminders: %d families, %d keys acked", len(items), len(acks))
 
 
+async def sync_bank_jars():
+    res = await api_client.sync_bank_jars()
+    moved = sum(r.get("reclassified", 0) for r in (res or []) if isinstance(r, dict))
+    if moved:
+        logger.info("bank jars synced: %s", res)
+
+
 async def sync_power_outages():
     res = await api_client.sync_power_outages()
     if res:
