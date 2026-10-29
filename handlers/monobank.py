@@ -110,16 +110,19 @@ async def process_mono_webhook_background(data):
         if not pending_cat:
             return
 
-        res = await api_client.add_transaction(user_info["current_active_family_id"], user_info["id"], pending_cat, real_amount,
-                                               t_type, f"❓ {desc}", "Монобанк", mono_id)
+        family_id = user_info["current_active_family_id"]
+        res = await api_client.add_transaction(family_id, user_info["id"], pending_cat, real_amount,
+                                               t_type, f"❓ {desc}", "Монобанк", mono_id, mcc=statement.get("mcc"))
         if res:
             # Категорії для клавіатури — тільки потрібного типу (витрати/доходи)
             cats = [c for c in all_cats if c['type'] == cat_type and "Очікує" not in c['name']]
+            sug = await api_client.suggest_category(family_id, res["id"])
+            hint = f"\n✨ <i>Bimi пропонує: {esc(sug.get('category_name', ''))} — {esc(sug.get('reason', ''))}</i>" if sug.get("category_id") else ""
             try:
                 await bot.send_message(tg_id,
                                        f"💳 <b>Нова {'витрата' if is_expense else 'виплата'}:</b>\n"
-                                       f"{icon} {real_amount:.2f} ₴\n🛒 {esc(desc)}\n\n<i>Обери категорію:</i>",
-                                       reply_markup=generate_mono_keyboard(res["id"], cats), parse_mode="HTML")
+                                       f"{icon} {real_amount:.2f} ₴\n🛒 {esc(desc)}{hint}\n\n<i>Обери категорію:</i>",
+                                       reply_markup=generate_mono_keyboard(res["id"], cats, suggested=sug), parse_mode="HTML")
             except Exception:
                 pass
 
@@ -153,10 +156,12 @@ async def send_next_unresolved(chat_id, tg_id):
     cats = await api_client.get_categories(user_info["current_active_family_id"], cat_type)
     cats = [c for c in cats if "Очікує" not in c['name']]
     sign = "+" if tx['type'] == "Поповнення" else ""
+    sug = await api_client.suggest_category(user_info["current_active_family_id"], tx["id"])
+    hint = f"\n✨ <i>Bimi пропонує: {esc(sug.get('category_name', ''))} — {esc(sug.get('reason', ''))}</i>" if sug.get("category_id") else ""
     await bot.send_message(chat_id,
                            f"⏳ <b>Нерозібраних: {len(unresolved)}</b>\n"
-                           f"📅 {tx['date']}\n💰 {sign}{tx['amount']} ₴\n🛒 {esc(tx['title'])}\n\n<i>Обери категорію:</i>",
-                           reply_markup=generate_mono_keyboard(tx["id"], cats), parse_mode="HTML")
+                           f"📅 {tx['date']}\n💰 {sign}{tx['amount']} ₴\n🛒 {esc(tx['title'])}{hint}\n\n<i>Обери категорію:</i>",
+                           reply_markup=generate_mono_keyboard(tx["id"], cats, suggested=sug), parse_mode="HTML")
 
 
 @dp.message(F.text.startswith("🧹 Розібрати"), StateFilter("*"))

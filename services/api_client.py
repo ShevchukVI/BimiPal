@@ -92,7 +92,7 @@ class BimiAPIClient:
                                 headers=_headers(x_family_id=family_id))
 
     async def add_transaction(self, family_id, user_id, cat_id, amount, t_type, title, account="Готівка", mono_id=None,
-                              date_str=None, note=None, currency="UAH"):
+                              date_str=None, note=None, currency="UAH", mcc=None):
         payload = {
             "family_id": family_id, "user_id": user_id, "category_id": cat_id,
             "amount": float(amount), "type": t_type, "title": title,
@@ -101,7 +101,13 @@ class BimiAPIClient:
         }
         if note:
             payload["note"] = note
+        if mcc:
+            payload["mcc"] = int(mcc)  # Monobank merchant type — a hint for «Bimi пропонує»
         return await self._post("/transactions", payload, headers=_headers(x_family_id=family_id))
+
+    async def suggest_category(self, family_id, tx_id):
+        """«Bimi пропонує»: {category_id, category_name, confidence, reason} або {} — категорія з історії сім'ї."""
+        return await self._get(f"/families/{family_id}/transactions/{tx_id}/suggest", headers=_headers(x_family_id=family_id)) or {}
 
     async def update_tx_by_mono(self, mono_id: str, category_id: int = None, note: str = None):
         payload = {}

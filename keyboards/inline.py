@@ -3,12 +3,17 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 
-def generate_mono_keyboard(tx_id, cats, expanded: bool = False) -> InlineKeyboardMarkup:
+def generate_mono_keyboard(tx_id, cats, expanded: bool = False, suggested: dict | None = None) -> InlineKeyboardMarkup:
     """Клавіатура розбору транзакції по категоріях (Inbox Zero).
     Ключ — transaction id (не mono_id). Показуємо максимум 8 категорій; якщо їх більше —
     кнопка «➡️ Показати всі», яка розгортає повний список (expanded)."""
-    shown = cats if expanded else cats[:8]
     kb_rows, row = [], []
+    sid = (suggested or {}).get("category_id")
+    if sid and any(c['id'] == sid for c in cats):  # «Bimi пропонує» — першою, на всю ширину
+        name = next(c['name'] for c in cats if c['id'] == sid)
+        kb_rows.append([InlineKeyboardButton(text=f"✨ {name}", callback_data=f"mcat:{tx_id}:{sid}")])
+        cats = [c for c in cats if c['id'] != sid]
+    shown = cats if expanded else cats[:8]
     for c in shown:
         row.append(InlineKeyboardButton(text=c['name'], callback_data=f"mcat:{tx_id}:{c['id']}"))
         if len(row) == 2:
