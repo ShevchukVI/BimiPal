@@ -16,7 +16,7 @@ from aiogram.fsm.state import State, StatesGroup
 from services.api_client import api_client
 from config import WEBHOOK_URL
 from handlers import bot, dp
-from keyboards.inline import after_categorize_kb, generate_mono_keyboard, next_unresolved_kb
+from keyboards.inline import after_categorize_kb, auto_done_keyboard, generate_mono_keyboard, next_unresolved_kb
 from utils import esc
 
 MONO_ACCOUNT_TO_USER = {}
@@ -113,7 +113,18 @@ async def process_mono_webhook_background(data):
         family_id = user_info["current_active_family_id"]
         res = await api_client.add_transaction(family_id, user_info["id"], pending_cat, real_amount,
                                                t_type, f"❓ {desc}", "Монобанк", mono_id, mcc=statement.get("mcc"))
-        if res:
+        if res and res.get("category_id") not in (None, pending_cat):
+            # «Bimi розкладає сам»: бекенд уже поставив категорію (метро → транспорт) — лише повідомляємо
+            cat = next((c for c in all_cats if c['id'] == res["category_id"]), None)
+            what = "🤖 Bimi розклав" if res.get("auto_category") else "🔗 Пов'язано"
+            try:
+                await bot.send_message(tg_id,
+                                       f"💳 <b>Нова {'витрата' if is_expense else 'виплата'}:</b>\n"
+                                       f"{icon} {real_amount:.2f} ₴\n🛒 {esc(desc)}\n\n{what}: <b>{esc(cat['name'] if cat else '')}</b>",
+                                       reply_markup=auto_done_keyboard(res["id"]), parse_mode="HTML")
+            except Exception:
+                pass
+        elif res:
             # Категорії для клавіатури — тільки потрібного типу (витрати/доходи)
             cats = [c for c in all_cats if c['type'] == cat_type and "Очікує" not in c['name']]
             sug = await api_client.suggest_category(family_id, res["id"])

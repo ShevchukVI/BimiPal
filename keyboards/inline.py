@@ -111,3 +111,8 @@ def currency_kb() -> InlineKeyboardMarkup:
     for cur, label in CURRENCY_BTN.items():
         kb_rows.append([InlineKeyboardButton(text=label, callback_data=f"cur:{cur}")])
     return InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+
+def auto_done_keyboard(tx_id) -> InlineKeyboardMarkup:
+    """Операцію вже розкладено автоматично — одна кнопка, щоб виправити (Bimi запам'ятає виправлення)."""
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Змінити категорію", callback_data=f"mall:{tx_id}")]])

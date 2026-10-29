@@ -14,3 +14,9 @@ def test_suggested_category_first_and_not_duplicated():
 def test_no_or_unknown_suggestion_keeps_old_keyboard():
     assert generate_mono_keyboard(5, CATS).inline_keyboard == generate_mono_keyboard(5, CATS, suggested={}).inline_keyboard
     assert generate_mono_keyboard(5, CATS, suggested={"category_id": 99}).inline_keyboard[0][0].text == "C1"
+
+
+def test_auto_done_keyboard_opens_full_list():
+    from keyboards.inline import auto_done_keyboard
+    kb = auto_done_keyboard(42).inline_keyboard
+    assert kb[0][0].callback_data == "mall:42"
